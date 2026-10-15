@@ -1,0 +1,196 @@
+%% Phosphorus 核心类图：数据模型 + 服务类
+%% 与 docs/ARCHITECTURE.md §9 保持一致
+classDiagram
+    class ModelConfig {
+        +int d_model
+        +int n_layer
+        +int n_head
+        +int n_kv_head
+        +int d_ff
+        +int vocab_size
+        +int max_seq_len
+        +float rope_theta
+        +float norm_eps
+        +ActType act
+        +bool tied_embed
+        +int early_exit_layer
+        +int early_head_rank
+        +n_params() int
+    }
+    class QuantConfig {
+        +QuantEnum scheme
+        +Granularity w_granularity
+        +Granularity a_granularity
+        +int block_size
+        +int hgf_rank
+        +float hgf_alpha
+        +bool qat
+    }
+    class DecodeConfig {
+        +int max_new_tokens
+        +float temperature
+        +int top_k
+        +float top_p
+        +bool stream
+        +SpecMode speculate
+        +int kv_block_size
+        +EvictionStrategy eviction
+        +float kv_budget_ratio
+    }
+    class Tokenizer {
+        +list~str~ vocab
+        +list~tuple~ merges
+        +dict specials
+        +encode(str) list~int~
+        +decode(list~int~) str
+        +save(Path)
+        +load(Path) Tokenizer
+    }
+    class BitLinear {
+        +Tensor weight_fp
+        +Tensor weight_scale
+        +HybridGatedFlow hgf
+        +forward(Tensor) Tensor
+        +quantize_weight_() Tensor
+        +straight_through(Tensor) Tensor
+    }
+    class HybridGatedFlow {
+        +int rank
+        +float alpha
+        +Tensor gate
+        +Tensor A
+        +Tensor B
+        +forward(Tensor) Tensor
+        +param_bytes() int
+    }
+    class LlamaModel {
+        +ModelConfig cfg
+        +list~Block~ layers
+        +forward(ids, exit_at) Tensor
+    }
+    class Trainer {
+        +TrainConfig cfg
+        +fit() dict
+        +step(batch) float
+        +save_ckpt(path)
+        +load_ckpt(path)
+    }
+    class PhosWriter {
+        +write_header(ModelConfig, flags)
+        +add_tensor(name, arr, quant)
+        +finalize(tokenizer, metadata) Path
+    }
+    class PhosReader {
+        +parse_header() Header
+        +tensor_index() dict
+        +get(name) ndarray
+        +tokenizer() Tokenizer
+    }
+    class Backend {
+        +str name
+        +gemm_fp32(a, b) ndarray
+        +gemm_int8(a, b) ndarray
+        +gemm_tl(Wp, xq) ndarray
+        +gemm_i2s(Wi8, xu8) ndarray
+        +rmsnorm(x, w) ndarray
+        +softmax(x) ndarray
+        +rope(x, pos) ndarray
+    }
+    class RuntimeWeights {
+        +dict tensors
+        +dict scales
+        +dict hgf
+        +Header header
+    }
+    class BlockManager {
+        +int block_size
+        +alloc(n) list~int~
+        +free(seq)
+        +can_alloc(n) bool
+        +utilization() float
+    }
+    class PagedKVCache {
+        +ndarray pool
+        +ndarray block_tables
+        +write(seq, layer, pos, k, v)
+        +gather(seq, layer) ndarray
+        +compact(seq, keep_mask)
+    }
+    class EvictionPolicy {
+        <<abstract>>
+        +select(scores, budget) ndarray
+    }
+    class SnapKVPolicy
+    class PyramidKVPolicy
+    class H2OPolicy
+    class BudgetAllocator {
+        +float ratio
+        +layer_budget(l, L, total) int
+    }
+    class Scheduler {
+        +step() Batch
+        +add_request(req)
+        +finished() list
+    }
+    class DraftModel {
+        <<abstract>>
+        +draft(ctx, K, width) DraftTree
+    }
+    class LayerSkipDrafter {
+        +int exit_layer
+        +draft(ctx, K, width) DraftTree
+    }
+    class NGramDrafter {
+        +int n
+        +draft(ctx, K, width) DraftTree
+    }
+    class AdaptiveController {
+        +float alpha_hat
+        +float cost_ratio
+        +SpecState state
+        +observe(K, gamma, t_draft, t_verify)
+        +plan(batch_size) SpecPlan
+    }
+    class VerifyResult {
+        +int n_accepted
+        +list~int~ tokens
+        +bool all_accepted
+    }
+    class Generator {
+        +generate(prompt, cfg) Iterator~int~
+        +speculative_step(ctx) VerifyResult
+    }
+    class BenchRunner {
+        +run(matrix) list~BenchResult~
+        +pareto_sweep(ranks) list~ParetoPoint~
+    }
+
+    LlamaModel *-- ModelConfig
+    LlamaModel *-- BitLinear
+    BitLinear *-- HybridGatedFlow
+    Trainer --> LlamaModel
+    Trainer --> ModelConfig
+    PhosWriter ..> LlamaModel : export
+    PhosWriter ..> Tokenizer
+    PhosReader ..> Tokenizer
+    PhosReader --> RuntimeWeights
+    RuntimeWeights --> Backend
+    Backend <|-- NumpyBackend
+    Backend <|-- NativeBackend
+    Scheduler --> BlockManager
+    Scheduler --> PagedKVCache
+    BlockManager --> PagedKVCache
+    EvictionPolicy <|-- SnapKVPolicy
+    EvictionPolicy <|-- PyramidKVPolicy
+    EvictionPolicy <|-- H2OPolicy
+    EvictionPolicy --> BudgetAllocator
+    PagedKVCache --> EvictionPolicy
+    DraftModel <|-- LayerSkipDrafter
+    DraftModel <|-- NGramDrafter
+    Generator --> DraftModel
+    Generator --> AdaptiveController
+    Generator --> PagedKVCache
+    Generator --> Backend
+    AdaptiveController ..> VerifyResult
+    BenchRunner --> Generator
+    Tokenizer --> ModelConfig

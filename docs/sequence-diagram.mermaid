@@ -1,0 +1,52 @@
+%% Phosphorus 关键调用流：训练 → 量化导出 → 推理
+%% 与 docs/ARCHITECTURE.md §4.1 保持一致；投机解码时序见 ARCHITECTURE.md §4.2
+sequenceDiagram
+    autonumber
+    actor U as 用户
+    participant CLI as cli.py
+    participant CRP as data.corpus
+    participant DS as data.dataset
+    participant BPE as tokenizer.bpe
+    participant TR as train.trainer
+    participant M as model.llama
+    participant Q as model.quantization
+    participant EX as quantize.export
+    participant PK as quantize.packing
+    participant LD as engine.model_loader
+    participant KR as kernels.registry
+    participant EG as engine.generate
+
+    U->>CLI: phosphorus train --config tiny.yaml
+    CLI->>CRP: load(corpus=tinystories)
+    CRP-->>CLI: Corpus(text)  [离线兜底: data/raw/]
+    CLI->>BPE: train(text, vocab_size=8192)
+    BPE-->>CLI: vocab + merges
+    CLI->>DS: encode(corpus) -> memmap ids
+    DS-->>CLI: TokenDataset
+
+    loop 每个 step (fp32 基线 或 QAT/STE)
+        CLI->>TR: fit()
+        TR->>M: forward(x, exit_at=E)  % LayerSkip 多出口
+        M->>Q: weight_quant_absmean(W)  % STE: 前向量化/反向直通
+        Q-->>M: W_hat {-1,0,1} * scale
+        M-->>TR: logits_main, logits_early
+        TR->>TR: loss = sum_e w_e * CE(logits_e, y)
+        TR->>TR: AdamW + cosine + clip(1.0)
+        TR->>TR: checkpoint.save(step)
+    end
+
+    U->>CLI: phosphorus quantize --in ckpt.pt --out tiny.phos --rank 4
+    CLI->>EX: export(ckpt, quant_cfg)
+    EX->>Q: 逐张量 absmean 量化 + SubLN/norm 保留 f32
+    EX->>PK: pack_ternary_v1(W_ternary)  % 24→5 字节
+    PK-->>EX: packed u8 + per-channel scale + row_wsum
+    EX->>EX: 写 Header(256B) + Index(n*128B) + Data + Tokenizer + Metadata
+    EX-->>CLI: tiny.phos (含 CRC32)
+
+    U->>CLI: phosphorus generate --model tiny.phos --prompt "..."
+    CLI->>LD: load(tiny.phos)  % mmap
+    LD->>KR: 探测 native(zig cc) → numpy → 回退
+    KR-->>LD: Backend
+    LD-->>CLI: RuntimeWeights
+    CLI->>EG: generate(weights, prompt, backend, speculate=auto)
+    EG-->>U: 流式 token
