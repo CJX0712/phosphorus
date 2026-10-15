@@ -5,6 +5,16 @@
 > 每个任务内部有若干**检查点（C1, C2, …）**——检查点不是独立任务，是同一任务内必须按顺序达成的验收门槛。
 > **每个任务结束时，仓库都必须处于「可安装 + pytest 绿 + ruff 干净」状态。**
 
+## ⚡ 实现状态（v0.1.0 · 2026-10）
+
+- **T1 ✅ 已完成**：工程地基 + 数据 + 分词 + CLI；25 项 pytest 全绿，ruff 干净；`no-torch` 导入路径通过（仅 `cli/train/model` 用 torch，且为惰性导入）。
+- **T2 ✅ 已完成**：LLaMA 变体 + absmean 三值 QAT-STE + HGF 低秩校正；`ternary_ste` 前向已修复为**真三值**（此前误写为 `2·w_tern·scale−w`，导致不变量⑦ 偏离 138%），修复后 STE 梯度恒等、权重建中 `{-1,0,1}` 占 100%。
+- **T3 ✅ 已完成**：`.phos` 导出 + 三值 5-bit 打包 + 纯 numpy 四后端；**不变量⑦ engine-vs-torch logits rel_err ≈ 0.0001%（argmax 100% 一致）**；不变量①③⑤⑥ 全部有测试覆盖。
+- **T4 🔜 规划中**：原生 C99 内核（`csrc/phos.h` 仅头文件）+ 分页 KV / 驱逐 / 连续批处理。
+- **T5 🔜 规划中**：投机解码（O1/O2）+ 基准矩阵 / Pareto（O3）+ 文档收尾（API / BENCHMARKS / CONTRIBUTING）。
+
+> 注：实际落地为**扁平包** `phosphorus/*.py`（详见 `ARCHITECTURE.md` §0.4 / §2.1），与本文初版规划的嵌套子包结构不同——功能等价，仅目录组织简化。C2（val_loss<3.5）/ C4（HGF 字节占比）/ C6（投机 α）等量化验收的实测数字见 `docs/BENCHMARKS.md`。
+
 ## 依赖关系总览
 
 ```mermaid

@@ -1,0 +1,32 @@
+# Phosphorus 的 ruff 配置。
+# 目标：只做「能抓到真 bug」的检查，不做风格洁癖。
+line-length = 100
+target-version = "py310"
+exclude = [".git", "build", "dist", ".venv", "venv", "__pycache__"]
+
+[lint]
+select = [
+    "E4",   # pycodestyle 缩进/续行类错误
+    "E7",   # pycodestyle 空白类错误
+    "E9",   # 语法错误
+    "F",    # pyflakes：未定义名 / 未使用导入
+    "I",    # isort：导入排序
+    "W",    # pyflakes 警告
+    "UP",   # pyupgrade：现代语法
+    "B",    # flake8-bugbear：常见 bug 模式
+    "SIM",  # flake8-simplify：可化简分支
+]
+ignore = [
+    "B008",   # 函数调用作为默认值（argparse 惯用法）
+    "B905",   # zip 未传 strict（py<3.10 兼容）
+    "SIM108", # 三元表达式（可读性优先时保留 if/else）
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["B011", "SIM300"]
+"scripts/*" = ["F401"]
+
+[format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"

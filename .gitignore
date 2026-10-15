@@ -1,0 +1,42 @@
+# --- Python -------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# --- 环境与产物 ---------------------------------------------------------------
+.venv/
+venv/
+env/
+*.so
+*.pyd
+*.dll
+*.dylib
+*.exe
+*.obj
+*.o
+
+# --- Phosphorus 运行产物（默认不入库，靠 Makefile 显式生成）--------------------
+artifacts/
+ckpt/
+benchmarks/results.json
+*.phos
+*.bin
+data/raw/*.bin
+
+# --- 编辑器 / 系统 ------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- 临时探测脚本 -------------------------------------------------------------
+_probe_*.py

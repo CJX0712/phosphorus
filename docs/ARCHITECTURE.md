@@ -33,7 +33,27 @@
 - Windows 开发，Linux/macOS 必须同样跑通（CI: `ubuntu-latest`）。
 - `pip` 必须带 `NO_PROXY='*' no_proxy='*'`。
 - Python venv：`C:/Users/Administrator/.workbuddy/binaries/python/envs/phos/Scripts/python.exe`（numpy 2.5.4 / pytest / ziglang 0.16.0；torch CPU 版）。
-- C 内核**不使用 OpenMP / pthread**（可移植性风险），并行由 Python `ThreadPoolExecutor` 在 row-block 粒度切分 + `ctypes` 释放 GIL 实现。
+  - C 内核**不使用 OpenMP / pthread**（可移植性风险），并行由 Python `ThreadPoolExecutor` 在 row-block 粒度切分 + `ctypes` 释放 GIL 实现。
+
+### 0.4 当前实现状态（v0.1.0 · 2026-10）
+
+> 下表给出**规划架构（本文 mermaid + §2.2）**与**已落地代码**的对照。
+> T1–T3 已交付为**扁平包** `phosphorus/`（单文件模块，无 `utils/`、`model/`、`quantize/`、`kernels/`、`speculate/`、`bench/`、`convert/` 子包）；
+> T4（原生 C99 内核）、T5（投机解码 / 基准 / Pareto）为**规划中**，见 `TASKS.md`。
+
+| 规划模块 | 实际落地文件 | 状态 |
+|---|---|---|
+| `utils/*` | 内联进各模块 | ✅ 已吸收（T1） |
+| `data/{corpus,dataset}` | `phosphorus/data.py` | ✅ T1 |
+| `tokenizer/*` | `phosphorus/tokenizer.py` | ✅ T1（不变量⑤） |
+| `model/{llama,quantization,hgf}` | `phosphorus/model.py` | ✅ T2 |
+| `train/*` | `phosphorus/train.py` | ✅ T2/T3 |
+| `quantize/{packing,export}` | `phosphorus/packing.py` / `phosphorus/export.py` | ✅ T3（不变量①③） |
+| `kernels/numpy_backend/gemm` | `phosphorus/gemm.py` | ✅ T3（不变量①） |
+| `engine/model_loader` | `phosphorus/loader.py` | ✅ T3 |
+| `engine`（推理主循环） | `phosphorus/engine.py` | ✅ T3（不变量⑦） |
+| `kernels/native/*` | `csrc/phos.h`（仅头） | 🔜 T4 规划中 |
+| `speculate/*` / `bench/*` / `convert/*` | 未实现 | 🔜 T5 规划中 |
 
 ---
 
@@ -159,94 +179,63 @@ phosphorus/
 ├── ruff.toml
 ├── scripts/
 │   ├── setup.sh                       # Linux/macOS: venv + pip(NO_PROXY='*') + 内核编译
-│   └── setup.ps1                      # Windows 等价
+│   ├── setup.ps1                      # Windows 等价
+│   └── smoke_zig.c                    # O4 zig cc 冒烟（T4 落地前提前验证）
 ├── .github/workflows/ci.yml           # ubuntu-latest, py3.10/3.11/3.12
-├── phosphorus/
+├── csrc/
+│   └── phos.h                         # 原生 C99 内核 ABI 头（T4 规划中）
+├── phosphorus/                        # 扁平包（T1–T3 已落地；无 model/ quantize/ kernels/ speculate/ bench/ 子包）
 │   ├── __init__.py                    # __version__, backend 探测
 │   ├── __main__.py                    # python -m phosphorus
-│   ├── cli.py                         # argparse 子命令分发
-│   ├── config.py                      # 全部 dataclass 配置 + YAML/JSON 序列化
-│   ├── utils/{__init__,seed,logging,memory,timer}.py
-│   ├── data/{__init__,corpus,dataset}.py
-│   ├── tokenizer/{__init__,pretokenize,bpe,tokenizer}.py
-│   ├── model/{__init__,config,modules,llama,quantization,hgf}.py
-│   ├── train/{__init__,trainer,lr_scheduler,checkpoint}.py
-│   ├── quantize/{__init__,packing,export,inspect}.py
-│   ├── kernels/
-│   │   ├── {__init__,registry}.py
-│   │   ├── numpy_backend/{__init__,gemm,ops}.py
-│   │   └── native/
-│   │       ├── phos_gemm.c / phos_gemm.h
-│   │       ├── phos_ops.c  / phos_ops.h
-│   │       ├── phos_pack.c / phos_pack.h
-│   │       ├── build.py               # zig cc 编译 + 缓存 + 失败回退
-│   │       └── bindings.py            # ctypes 绑定 + GIL 释放
-│   ├── engine/
-│   │   ├── {__init__,model_loader,block_manager,kv_cache,eviction,
-│   │   │    scheduler,attention,sampler,generate}.py
-│   ├── speculate/
-│   │   ├── {__init__,base,layerskip,ngram,eagle,medusa,tree,verify,controller}.py
-│   ├── bench/{__init__,runner,metrics,report,pareto}.py
-│   ├── convert/{__init__,hf_import,hf_export}.py
+│   ├── cli.py                         # argparse 子命令：train/export/generate/bench/tokenize
+│   ├── config.py                      # 全部 dataclass 配置 + JSON 序列化
+│   ├── data.py                        # 语料 + 数据集（合并自 data/）
+│   ├── tokenizer.py                   # BPE（合并自 tokenizer/）
+│   ├── model.py                       # LLaMA 变体 + 三值 QAT + HGF（合并自 model/）
+│   ├── train.py                       # trainer + 导出（合并自 train/）
+│   ├── export.py                      # ckpt -> .phos（合并自 quantize/export）
+│   ├── packing.py                     # 三值 5-bit pack/unpack（合并自 quantize/packing）
+│   ├── gemm.py                        # TL / I2_S / int32 参考（合并自 kernels/numpy_backend/gemm）
+│   ├── loader.py                      # .phos 加载（合并自 engine/model_loader）
+│   ├── engine.py                      # 纯 numpy 推理引擎
+│   └── sampling.py                    # top-k / top-p / temp
 ├── tests/
-│   ├── conftest.py
-│   ├── test_bpe.py                    # 不变量 ⑤
-│   ├── test_packing.py                # 不变量 ③
+│   ├── test_data.py                   # 数据集不变量
 │   ├── test_gemm_bitwise.py           # 不变量 ①
-│   ├── test_rope.py                   # 不变量 ④
+│   ├── test_packing.py                # 不变量 ③
+│   ├── test_tokenizer.py              # 不变量 ⑤
 │   ├── test_qat_ste.py                # 不变量 ⑥
-│   ├── test_speculative_distribution.py  # 不变量 ②
-│   ├── test_kv_eviction.py            # 不变量 ⑦
-│   ├── test_native_backend.py
-│   ├── test_phos_roundtrip.py
-│   ├── test_engine_parity.py
-│   └── test_controller.py
-├── data/raw/                          # 内置极小语料（随仓库提交，离线兜底）
+│   ├── test_loader.py                 # 三值 / HGF 往返 + 头字段
+│   └── test_engine.py                 # 不变量 ⑦
+├── data/raw/
+│   └── tinyshakespeare.txt            # 离线兜底语料（随仓库提交，1.1 MB）
 └── docs/
     ├── ARCHITECTURE.md                # 本文
     ├── ALGORITHMS.md                  # 借鉴来源 + 超越点
     ├── TASKS.md                       # 任务分解
-    ├── API.md
-    ├── BENCHMARKS.md
-    └── CONTRIBUTING.md
+    └── BENCHMARKS.md                  # 实测基准（T5 补全；含 T3 端到端数字）
 ```
 
 ### 2.2 模块职责 / 输入 / 输出 / 关键数据结构
 
-| 模块 | 职责 | 输入 | 输出 | 关键数据结构 |
-|---|---|---|---|---|
-| `data.corpus` | 语料获取；优先内置 `data/raw/*.txt`，缺则下载 tinyshakespeare/TinyStories 子集，下载失败用内置兜底 | `--corpus {builtin,tinystories,shakespeare,path}` | 原始文本 + sha256 记录 | `Corpus(text:str, name:str, sha256:str, n_chars:int)` |
-| `data.dataset` | token id → memmap；滑窗 batch；可复现 shuffle | `np.memmap`, `block_size` | `(x,y)` int32 batch | `TokenDataset(path, block_size, stride)` |
-| `tokenizer.pretokenize` | GPT-2 预分词正则 + 字节级映射 | str | `list[str]` | `GPT2_PAT`, `bytes_to_unicode()` |
-| `tokenizer.bpe` | BPE 训练（Sennrich 2016 合并对统计 + 优先级队列） | 语料, `vocab_size` | `merges: list[(str,str)]`, `vocab` | `BPETrainer(vocab_size, min_freq)` |
-| `tokenizer.tokenizer` | encode/decode/特殊 token/保存加载 | str ↔ `list[int]` | `Tokenizer` | `Tokenizer(vocab, merges, specials, unk_id)` |
-| `model.modules` | RMSNorm / SubLN / RotaryEmbedding / GQA-Attn / MLP | tensor | tensor | `RMSNorm`, `SubLN`, `Rotary`, `ReLU2` |
-| `model.llama` | LLaMA 主体；多出口（O1 早退）；tied embedding | ids, `exit_layer` | logits 或 hidden | `LlamaModel.forward(..., exit_at=None)` |
-| `model.quantization` | absmean 三值量化 + STE + BitLinear 替换 | fp32 Linear | 量化 Linear | `weight_quant_absmean`, `activation_quant`, `BitLinear`, `QATStraightThrough` |
-| `model.hgf` | HGF 低秩校正通路（O3） | hidden | 校正增量 | `HybridGatedFlow(d_in,d_out,rank,alpha,gate)` |
-| `train.trainer` | AdamW + cosine + grad clip + AMP-off + ckpt + LayerSkip 多出口损失 | `TrainConfig` | ckpt + metrics | `Trainer.step()`, `Trainer.fit()` |
-| `quantize.packing` | 三值 5-bit pack/unpack（24→5 字节） | `int8[N]` | `uint8` | `pack_ternary_v1`, `unpack_ternary_v1` |
-| `quantize.export` | ckpt → `.phos`（含 HGF、row_wsum、tokenizer、metadata） | ckpt, `QuantConfig` | `.phos` | `PhosWriter`, `TensorEntry` |
-| `kernels.registry` | 后端选择：`native → numpy → pure-python` 三级回退 | `PHOS_BACKEND` | 具体 GEMM/ops 实现 | `Backend(name, gemm_tbl, gemm_i2s, ...)` |
-| `kernels.numpy_backend.gemm` | fp32 / int8 / TL(LUT) / I2_S 四种 GEMM | W(packed 或 int8), x | y | `gemm_fp32`, `gemm_int8`, `gemm_tl`, `gemm_i2s` |
-| `kernels.native` | C99 内核：TL GEMM、I2_S GEMM、RMSNorm、softmax、RoPE、pack/unpack | ctypes 数组 | 结果数组 | `phos_tl_gemm(...)` 等 C ABI |
-| `engine.model_loader` | `.phos` mmap 加载 → 运行时权重视图 | 文件路径 | `RuntimeWeights` | `RuntimeWeights(tensors:dict, meta:dict)` |
-| `engine.block_manager` | 页块分配/释放/抢占（PagedAttention） | 请求 | `block_table: int32[S, Bmax]` | `BlockManager(alloc, free, can_alloc)` |
-| `engine.kv_cache` | 分页 KV 物理池 + 逻辑→物理映射 + int8 量化 KV | layer, head, pos | K/V 视图 | `PagedKVCache(kv:uint8, scales, block_tables)` |
-| `engine.eviction` | SnapKV / PyramidKV / H2O / StreamingLLM / None + 预算分配器 | attn scores, budget | `keep_mask` | `EvictionPolicy.select()`, `BudgetAllocator.layer_budget()` |
-| `engine.scheduler` | 连续批处理；prefill/decode 混合；抢占回收 | `Seq[]` | `Batch` | `Scheduler.step() -> Batch` |
-| `engine.attention` | GQA 注意力 + 分页 gather + 树掩码 + RoPE | q, block_table, mask | out | `paged_gqa_attention(...)` |
-| `engine.sampler` | temperature / top-k / top-p / min-p | logits | next id | `Sampler.sample(logits, rng)` |
-| `engine.generate` | 生成主循环；流式回调 | prompt | token 流 | `Generator.generate(..., stream=True)` |
-| `speculate.base` | 草稿生成器协议 | context | `DraftTree` | `DraftModel.draft(ctx) -> DraftTree` |
-| `speculate.layerskip` | **O1**：前 E 层 + 早退 head，走同一份三值权重 | ctx | `DraftTree` | `LayerSkipDrafter(model, exit_layer, K, width)` |
-| `speculate.ngram` | n-gram / prompt-lookup 零成本草稿（llama.cpp PR#18471） | prompt | `DraftTree` | `NGramDrafter(ngram_n=3, max_draft=8)` |
-| `speculate.tree` | 树状草稿构造 + 掩码生成（EAGLE-2 式按概率剪枝） | 候选序列 | 掩码 + 位置 | `build_tree(paths)`, `tree_mask(paths)` |
-| `speculate.verify` | Leviathan 投机采样验证（严格分布等价） | draft tokens, target probs | accepted 数 + 修正 token | `speculative_verify(...)` |
-| `speculate.controller` | **O2**：在线拟合 α、c；K/树宽/开关决策 + 状态机 | 每步观测 | `SpecPlan(K, width, enabled)` | `AdaptiveController.observe()`, `.plan()` |
-| `bench.runner` | 跑基准矩阵（fp32/int8/三值/三值+投机 × 批大小 × 序列长） | 配置 | `BenchResult[]` | `BenchResult(tokens_per_s, ms_per_token, ttft_ms, rss_mb, ppl, alpha, speedup)` |
-| `bench.report` | JSON + Markdown 表 + ASCII 柱状图 | 结果 | 三份产物 | `render_json/md/ascii()` |
-| `bench.pareto` | **O3**：r 扫描 → PPL vs 内存 Pareto | r 列表 | 曲线 | `pareto_sweep(ranks)` |
+| 模块（实际文件） | 职责 | 关键对象 / 函数 | 状态 |
+|---|---|---|---|
+| `phosphorus/data.py` | 语料获取（内置优先 + 下载兜底 + sha256 校验）；token id 滑窗数据集 | `Corpus`, `TokenDataset` | ✅ T1 |
+| `phosphorus/tokenizer.py` | BPE 训练（Sennrich 2016）+ 字节级映射；encode/decode；256 字节种子保证 CJK/emoji 无损往返 | `Tokenizer`, `train_from_corpus` | ✅ T1（不变量⑤） |
+| `phosphorus/config.py` | 全部 `dataclass` 配置 + JSON 序列化 | `ModelConfig`, `TrainConfig`, `QuantConfig`, `DecodeConfig`, `PhosphorusConfig` | ✅ T1 |
+| `phosphorus/model.py` | LLaMA 变体（Pre-RMSNorm / RoPE / GQA / ReLU² / SubLN）+ absmean 三值 QAT-STE + HGF 低秩校正 | `LlamaModel`, `ternary_ste`, `BitLinear`, `HybridGatedFlow` | ✅ T2 |
+| `phosphorus/train.py` | AdamW + cosine + grad clip + ckpt + 导出 `.phos` | `run_train`, `export_trained` | ✅ T2/T3 |
+| `phosphorus/export.py` | ckpt → `.phos`（三值 5-bit 打包 + HGF 因子 + tokenizer + metadata） | `export_model`, `PhosWriter` | ✅ T3 |
+| `phosphorus/packing.py` | 三值 5-bit pack/unpack（24 权重 → 5 字节，14 项 LUT） | `pack_ternary_v1`, `unpack_ternary_v1` | ✅ T3（不变量③） |
+| `phosphorus/gemm.py` | TL / I2_S / int32 参考 GEMM（位精确） | `gemm_tl`, `gemm_i2s`, `int32_reference` | ✅ T3（不变量①） |
+| `phosphorus/loader.py` | `.phos` 加载 → 运行时权重 + HGF + tokenizer | `load_phos`, `PhosFile` | ✅ T3 |
+| `phosphorus/engine.py` | 纯 numpy 推理引擎（KV cache / prefill-decode / 采样 / RoPE） | `PhosModel`, `_KVCache` | ✅ T3（不变量⑦） |
+| `phosphorus/sampling.py` | temperature / top-k / top-p 采样 | `sample` | ✅ T3 |
+| `phosphorus/cli.py` | 子命令分发：`train / export / generate / bench / tokenize` | `build_parser`, `main` | ✅ T1 |
+| `csrc/phos.h` | 原生 C99 内核 ABI 头（TL GEMM / RMSNorm / softmax / RoPE / pack） | `phos_tl_gemm_f32` 等 | 🔜 T4 规划中 |
+| `speculate/*` | O1 自草稿 / O2 控制器 / 树 / Leviathan 验证 | — | 🔜 T5 规划中 |
+| `bench/*` | 基准矩阵 / Pareto 曲线 | — | 🔜 T5 规划中 |
+| `convert/*` | HF 导入/导出 | — | 🔜 T5 规划中 |
 | `convert.hf_*` | HF `transformers` ↔ `.phos` / ckpt 互转 | safetensors | 目标格式 | `import_hf()`, `export_hf()` |
 
 ---

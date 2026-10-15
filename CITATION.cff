@@ -1,0 +1,34 @@
+cff-version: 1.2.0
+title: "Phosphorus: 三值原生 LLM 的训练与投机解码推理引擎"
+message: "若使用本软件，请按如下方式引用。"
+type: software
+authors:
+  - given-names: 晨星
+    family-names: CJX0712
+    email: cjx0712@example.com
+    affiliation: "Independent Researcher"
+repository-code: "https://github.com/CJX0712/phosphorus"
+url: "https://github.com/CJX0712/phosphorus"
+abstract: >-
+  Phosphorus（晨星）是一个面向 CPU 的 1.58-bit（BitNet b1.58）三值大语言模型的训练与推理引擎。
+  它实现了三值量化感知训练（absmean + STE）、HGF 低秩校正、5-bit 三值打包格式（.phos）、
+  四后端 GEMM（fp32 / int8 / TL / I2_S）、以及三值原生自草稿投机解码与自适应控制器。
+keywords:
+  - 1.58-bit
+  - BitNet
+  - ternary quantization
+  - speculative decoding
+  - CPU inference
+license: Apache-2.0
+version: 0.1.0
+date-released: "2026-10-16"
+preferred-citation:
+  type: software
+  title: "Phosphorus: 三值原生 LLM 的训练与投机解码推理引擎"
+  authors:
+    - given-names: 晨星
+      family-names: CJX0712
+  year: 2026
+  url: "https://github.com/CJX0712/phosphorus"
+  version: 0.1.0
+  license: Apache-2.0

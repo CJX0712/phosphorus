@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phosphorus"
+version = "0.1.0"
+description = "Phosphorus（晨星）：三值原生（BitNet b1.58 / 1.58-bit）LLM 的训练 + 投机解码推理引擎"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "晨星 CJX0712", email = "cjx0712@example.com" }]
+keywords = ["llm", "quantization", "bitnet", "ternary", "speculative-decoding", "cpu"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# core 分组：装了就能推理（推理路径不 import torch）
+dependencies = ["numpy>=1.24,<3", "tqdm>=4.66"]
+
+[project.optional-dependencies]
+train = ["torch>=2.2"]
+native = ["ziglang>=0.13"]
+bench = ["numpy>=1.24", "psutil>=5.9"]
+convert = ["transformers>=4.40", "safetensors>=0.4"]
+dev = ["pytest>=7.4", "pytest-cov>=4.1", "ruff>=0.6"]
+viz = ["matplotlib>=3.8"]
+all = ["phosphorus[train,native,bench,convert,dev]"]
+
+[project.urls]
+Homepage = "https://github.com/CJX0712/phosphorus"
+Repository = "https://github.com/CJX0712/phosphorus"
+Documentation = "https://github.com/CJX0712/phosphorus/blob/main/docs/ARCHITECTURE.md"
+
+[project.scripts]
+phosphorus = "phosphorus.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["phosphorus*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]

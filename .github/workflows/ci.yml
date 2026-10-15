@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m ruff check .
+      - run: python -m ruff format --check .
+
+  test:
+    name: pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[train,dev]"
+      - run: python -m pytest -q
+
+  # 质量红线：推理路径（core 分组）必须能在没有 torch 的环境里 import。
+  no-torch:
+    name: import without torch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e "."          # 只装 core：numpy + tqdm
+      - run: python -c "import importlib.util as u; assert u.find_spec('torch') is None, 'torch 不应被安装'"
+      - run: python -c "import phosphorus; print('ok', phosphorus.__version__)"
+      - run: python -c "import phosphorus.engine; print('engine ok (no torch)')"
+      - run: python -c "import phosphorus.gemm; print('gemm ok (no torch)')"
+      - run: python -c "import phosphorus.loader; print('loader ok (no torch)')"
+      - run: python -m phosphorus --help
+
+  # O4：zig cc 编译链冒烟（零系统编译器依赖）。T4 原生内核落地前的提前验证项，
+  # 失败不阻断主流程（continue-on-error）。
+  zig:
+    name: zig cc smoke
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[native]"
+      - run: python -m ziglang cc -O2 -o smoke_zig scripts/smoke_zig.c
+      - run: ./smoke_zig
