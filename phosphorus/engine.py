@@ -290,7 +290,9 @@ class PhosModel:
         rng = np.random.default_rng(seed)
         ctx = self.tok.encode(prompt)
         if not ctx:
-            ctx = [self.bos_id] if self.bos_id is not None else [0]
+            # 特殊 token（如 <|bos|>）的 id 可能 >= vocab（词表外），嵌入表无对应行；
+            # 训练语料也未前置特殊 token，故回退到 id 0（与训练行为一致）。
+            ctx = [self.bos_id] if (self.bos_id is not None and 0 <= self.bos_id < self.vocab) else [0]
         self.reset()
         logits = self.forward(np.array(ctx, dtype=np.int64))
         next_id = _sample(logits[-1], temperature, top_k, top_p, rng)

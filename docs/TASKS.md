@@ -9,7 +9,7 @@
 
 - **T1 ✅ 已完成**：工程地基 + 数据 + 分词 + CLI；25 项 pytest 全绿，ruff 干净；`no-torch` 导入路径通过（仅 `cli/train/model` 用 torch，且为惰性导入）。
 - **T2 ✅ 已完成**：LLaMA 变体 + absmean 三值 QAT-STE + HGF 低秩校正；`ternary_ste` 前向已修复为**真三值**（此前误写为 `2·w_tern·scale−w`，导致不变量⑦ 偏离 138%），修复后 STE 梯度恒等、权重建中 `{-1,0,1}` 占 100%。
-- **T3 ✅ 已完成**：`.phos` 导出 + 三值 5-bit 打包 + 纯 numpy 四后端；**不变量⑦ engine-vs-torch logits rel_err ≈ 0.0001%（argmax 100% 一致）**；不变量①③⑤⑥ 全部有测试覆盖。
+- **T3 ✅ 已完成**：`.phos` 导出 + 三值 5-bit 打包 + 纯 numpy 四后端；**不变量⑦ engine-vs-torch logits rel_err ≈ 0.0001%（argmax 100% 一致）**；不变量①③⑤⑥ 全部有测试覆盖。**端到端实测**（`docs/BENCHMARKS.md`）：真实训练 qat-hgf 1.78M × 150 步，val_loss 4.4979 → 3.8987（ppl 49.36）；`generate` 输出连贯莎剧风格文本；`bench` prefill 1296 tok/s、decode 290.9 tok/s。
 - **T4 🔜 规划中**：原生 C99 内核（`csrc/phos.h` 仅头文件）+ 分页 KV / 驱逐 / 连续批处理。
 - **T5 🔜 规划中**：投机解码（O1/O2）+ 基准矩阵 / Pareto（O3）+ 文档收尾（API / BENCHMARKS / CONTRIBUTING）。
 

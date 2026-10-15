@@ -106,7 +106,8 @@ def cmd_bench(a: argparse.Namespace) -> None:
 
     model = PhosModel.from_file(a.model)
     n = a.tokens
-    start = model.bos_id if model.bos_id is not None else 0
+    # 特殊 token（如 <|bos|>）id 可能 >= vocab，嵌入表无对应行；回退到 id 0 做吞吐基准。
+    start = model.bos_id if (model.bos_id is not None and 0 <= model.bos_id < model.vocab) else 0
     prompt_ids = [start] * min(8, model.max_seq_len)
     model.reset()
     t0 = time.time()

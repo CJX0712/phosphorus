@@ -115,3 +115,23 @@ def test_engine_generate_runs():
     eng = PhosModel(pf, quant_act=False)
     out = eng.generate("abc", max_new_tokens=4, temperature=0.0, seed=0)
     assert isinstance(out, str)
+
+
+def test_engine_generate_empty_prompt_falls_back_when_bos_out_of_vocab():
+    """回归：tokenizer 特殊 token（如 <|bos|>）id 可能 >= vocab（词表外），
+    generate 空 prompt 须回退到 id 0 而非 IndexError（复现 bench 的崩溃）。"""
+    mcfg = ModelConfig(
+        d_model=64, n_layer=2, n_head=4, n_kv_head=2, d_ff=128, vocab_size=256, max_seq_len=128
+    )
+    qcfg = QuantConfig(hgf_rank=0, qat=True)
+    model = LlamaModel(mcfg, qcfg).eval()
+    with torch.no_grad():
+        weights = model.export_numpy()
+    # vocab_size=256 -> 基础 256 字节 + 0 个 merge；4 个特殊 token 追加到 id 256+（词表外）
+    tok = Tokenizer.train("hello world abc def", vocab_size=256)
+    assert tok.specials.get("<|bos|>", -1) >= mcfg.vocab_size, "需复现 special id 越界"
+    blob = export_model(weights, mcfg, qcfg, tokenizer=tok, path="ckpt/_t_spec.phos")
+    pf = load_phos(blob)
+    eng = PhosModel(pf, quant_act=False)
+    out = eng.generate("", max_new_tokens=2, temperature=0.0, seed=0)
+    assert isinstance(out, str)
