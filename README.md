@@ -53,6 +53,20 @@ python -m scripts.bench_native --model ckpt/tiny.phos --reps 7
 > 未装 zig 时自动静默回退 NumPy 后端（结果不变，仅速度不同）。
 > 实测数字与调度规则见 [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) §4。
 
+想跑连续批处理（多序列融合一次前向，吞吐 2.35× 串行）？用 `sched` 子命令：
+
+```bash
+# 一次融合 8 条 prompt，自动按 max-seqs 切分波次，--bench 打印吞吐
+python -m phosphorus sched --model ckpt/tiny.phos \
+    --prompts "To be, or not to be" "Once upon a time" "The king said" "In the beginning" \
+              "It was the best" "She looked at" "All the world" "When the sun" \
+    --max-seqs 8 --max_new_tokens 40 --temperature 0.0 --top_k 1 --bench
+# 也支持 dense 后端逐序列与 paged 融合等价对照（T4-D 测试已守护）
+```
+
+> 连续批处理设计、等价性与吞吐实测见 [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) §5.5 与
+> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §5.7。
+
 ---
 
 ## 仓库结构（节选）
@@ -68,7 +82,8 @@ phosphorus/
 │   ├── gemm.py         GEMM 后端：TL(LUT) / I2_S / int32 参考
 │   ├── export.py       .phos 字节级导出
 │   ├── loader.py       .phos 加载（运行时零 torch）
-│   ├── engine.py       推理引擎：NumPy + native 自适应调度 + 分页 KV（--kv dense|paged）
+│   ├── engine.py       推理引擎：NumPy + native 自适应调度 + 分页 KV（--kv dense|paged）+ 融合连续批处理 forward_step
+│   ├── scheduler.py     连续批处理调度器 Scheduler：波次切分 + greedy/采样生成（C6/C7）
 │   ├── backend.py      实现后端注册：native / numpy（auto 降级）
 │   ├── block_manager.py 分页块管理：block_tables / 引用计数 / 滑动窗口（vLLM 语义）
 │   ├── kv_cache.py     分页 KV 物理池 + begin/write/gather 三段式协议

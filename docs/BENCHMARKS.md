@@ -207,6 +207,47 @@ python -m phosphorus.cli generate --model ckpt/tiny.phos \
     --prompt "人工智能的未来" --max_new_tokens 16
 ```
 
+### 5.5 T4-D：连续批处理吞吐（实测）
+
+`Scheduler` 把 8 条序列的新 token **融合进一次前向**（`PhosModel.forward_step`），
+与逐条串行（每条 `reset` 后单独 `forward`）做**同 token 总量**对比。
+环境同 §4；模型 `ckpt/tiny.phos`（d_model=192, n_layer=3, n_head=3, n_kv=1）。
+
+| 配置 | 序列数 | 每序列新 token | 总 token | 耗时 (s) | 吞吐 (tok/s) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 逐条串行（baseline） | 8 | 40 | 320 | 0.649 | 492.8 |
+| **融合连续批处理** | 8 | 40 | 320 | 0.276 | **1158.8** |
+
+**加速比 = 2.35×**（1158.8 / 492.8），满足 C6「融合前向 ≥ 2× 串行」验收
+（`tests/test_scheduler.py::test_scheduler_throughput_speedup` 断言守护）。
+
+**等价性（C6 正确性）**：融合生成的 token id 与逐条串行**逐位一致**
+（`test_scheduler_greedy_matches_serial`，greedy / temperature=0 / top_k=1）；
+单序列 `forward_step` 末位 logits 与 `forward` 最大差 < 1e-5
+（`test_forward_step_single_matches_forward`）；多序列融合各序列 logits 与各自单序列一致
+（`test_forward_step_multiseq_matches_individual`）。
+
+**采样（C7）**：`temperature=0` → greedy；同 seed 两次运行结果 `==`
+（`test_scheduler_reproducible_same_seed`）；随机采样（temp=0.9, top_k=10, top_p=0.95）
+与贪心结果 `!=`（`test_scheduler_stochastic_differs_from_greedy`）；每序列独立
+`np.random.default_rng(seed + 全局下标)` 保证融合批与逐条串行在随机采样下逐位一致。
+> 注：本机为 Python/NumPy CPU 单线程路径，融合收益主要来自「把 8 次 Python 循环 +
+> 8 次独立 KV 读写 + 8 次 RMSNorm/FFN 调度」摊薄为 1 次；在原生 C99 + 多线程后端下
+> 加速比会更高（T4-A native 内核已位精确，融合批可直接叠加）。
+
+**复现**：
+
+```bash
+# 连续批处理等价 + 吞吐 + 采样（8 条断言）
+python -m pytest tests/test_scheduler.py -q
+
+# CLI 端到端（融合 8 条 + 吞吐打印）
+python -m phosphorus.cli sched --model ckpt/tiny.phos \
+    --prompts "To be, or not to be" "Once upon a time" "The king said" "In the beginning" \
+              "It was the best" "She looked at" "All the world" "When the sun" \
+    --max-seqs 8 --max_new_tokens 40 --temperature 0.0 --top_k 1 --bench
+```
+
 ## 6. 生成样本（实测输出）
 
  prompt `"To be, or not to be"`，采样 160 tokens，temperature 默认：

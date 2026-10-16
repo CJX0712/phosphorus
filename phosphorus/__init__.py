@@ -16,6 +16,8 @@ import os
 import platform
 from typing import Final
 
+from .scheduler import Scheduler
+
 __version__: Final[str] = "0.1.0"
 __author__: Final[str] = "晨星（CJX0712）"
 __license__: Final[str] = "Apache-2.0"
@@ -65,6 +67,7 @@ __all__ = [
     "__author__",
     "__license__",
     "__version__",
+    "Scheduler",
     "default_backend",
     "default_threads",
     "env_summary",

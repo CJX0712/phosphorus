@@ -115,7 +115,9 @@ def test_forced_keep_below_floor(name):
 # 3. compact 物理压缩：逐位等价 + layer_len + 空间归还
 # --------------------------------------------------------------------------- #
 def _make_cache(n_blocks=32, block_size=8, n_layer=3, n_kv=2, d_head=16, n_seqs=1):
-    mgr = BlockManager(n_blocks=n_blocks, block_size=block_size, n_seqs=n_seqs, max_blocks_per_seq=n_blocks - 1)
+    mgr = BlockManager(
+        n_blocks=n_blocks, block_size=block_size, n_seqs=n_seqs, max_blocks_per_seq=n_blocks - 1
+    )
     return PagedKVCache(mgr, n_layer, n_kv, d_head)
 
 
@@ -140,7 +142,7 @@ def test_compact_roundtrip_uniform():
     keep[:24] = True
     dropped = cache.compact(0, keep)
     assert dropped == 16
-    assert int(cache.layer_len[0]) == 24
+    assert int(cache.layer_len[0, 0]) == 24
     assert cache.mgr.seq_len(0) == 24
     # 逐层 K/V 逐位等价
     for li in range(L):
@@ -169,7 +171,7 @@ def test_compact_per_layer_different():
     # 块表按 max(keep) 分配 -> 共享 seq_len = 30
     assert cache.mgr.seq_len(0) == 30
     for li in range(L):
-        assert int(cache.layer_len[li]) == keep_counts[li]
+        assert int(cache.layer_len[0, li]) == keep_counts[li]
         k, _ = cache.gather(0, li)
         assert k.shape[0] == keep_counts[li]
         np.testing.assert_array_equal(k, src[li][: keep_counts[li]])
@@ -185,7 +187,7 @@ def test_compact_noop():
     keep = np.ones(T, dtype=bool)
     dropped = cache.compact(0, keep)
     assert dropped == 0
-    assert int(cache.layer_len[0]) == T
+    assert int(cache.layer_len[0, 0]) == T
 
 
 # --------------------------------------------------------------------------- #

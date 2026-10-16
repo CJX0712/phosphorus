@@ -43,7 +43,9 @@ def _pool1d(x: np.ndarray, kernel: int, mode: str) -> np.ndarray:
     if kernel <= 1:
         return x
     pad = kernel // 2
-    xp = np.concatenate([np.full(pad, x[0], dtype=x.dtype), x, np.full(kernel - 1 - pad, x[-1], dtype=x.dtype)])
+    xp = np.concatenate(
+        [np.full(pad, x[0], dtype=x.dtype), x, np.full(kernel - 1 - pad, x[-1], dtype=x.dtype)]
+    )
     if mode == "avgpool":
         c = np.convolve(xp, np.ones(kernel, dtype=x.dtype) / kernel, mode="valid")
     elif mode == "maxpool":

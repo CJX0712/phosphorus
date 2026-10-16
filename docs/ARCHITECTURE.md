@@ -41,7 +41,8 @@
 > T1–T3 已交付为**扁平包** `phosphorus/`（单文件模块，无 `utils/`、`model/`、`quantize/`、`kernels/`、`speculate/`、`bench/`、`convert/` 子包）；
 > T4（原生 C99 内核）已交付 **T4-A**（GEMM + pack + 归一化/softmax/RoPE 内核）、
 > **T4-B**（分页 KV + 块管理 + 引擎接入）、**T4-C**（KV 驱逐 SnapKV/PyramidKV/H2O/StreamingLLM）；
-> T4-D（连续批处理 + 采样器）、T4-E（性能 / 端到端生成 / 文档收尾）与 T5 为**规划中**，见 `TASKS.md`。
+> **T4-D**（连续批处理调度器 + 融合前向 + 采样器）已交付：8 条序列融合前向 token id 与逐条串行逐位一致，吞吐 **2.35×**；
+> T4-E（性能 / 端到端生成 / 文档收尾）与 T5 为**规划中**，见 `TASKS.md`。
 
 | 规划模块 | 实际落地文件 | 状态 |
 |---|---|---|
@@ -53,11 +54,12 @@
 | `quantize/{packing,export}` | `phosphorus/packing.py` / `phosphorus/export.py` | ✅ T3（不变量①③） |
 | `kernels/numpy_backend/gemm` | `phosphorus/gemm.py` | ✅ T3（不变量①） |
 | `engine/model_loader` | `phosphorus/loader.py` | ✅ T3 |
-| `engine`（推理主循环） | `phosphorus/engine.py` | ✅ T3（不变量⑦）+ T4-A 自适应 native 调度 + T4-B 分页 KV |
+| `engine`（推理主循环） | `phosphorus/engine.py` | ✅ T3（不变量⑦）+ T4-A 自适应 native 调度 + T4-B 分页 KV + **T4-D 融合前向 `forward_step`** |
 | 分页 KV / 块管理 / GQA 注意力 | `phosphorus/kv_cache.py`, `block_manager.py`, `attention.py` | ✅ T4-B（不变量⑨⑩） |
 | `kernels/native/*` | `phosphorus/csrc/*.{c,h}` + `phosphorus/native/*` | ✅ T4-A（zig cc 编译，位精确） |
 | 实现后端注册 | `phosphorus/backend.py` | ✅ T4-A |
-| `speculate/*` / `bench/*` / `convert/*` | 未实现（基准脚本 `scripts/bench_*.py` 已随 T4-A 落地） | 🔜 T4-C~E / T5 规划中 |
+| 连续批处理调度器 | `phosphorus/scheduler.py`（`Scheduler` + 波次切分 + greedy/采样生成） | ✅ T4-D（C6 等价 + C7 采样；融合 8 条吞吐 2.35×） |
+| `speculate/*` / `bench/*` / `convert/*` | 未实现（基准脚本 `scripts/bench_*.py` 已随 T4-A 落地） | 🔜 T4-E / T5 规划中 |
 
 ---
 
@@ -826,6 +828,28 @@ logits 最大差 < 1e-4、argmax 100% 一致（不变量 ⑨）。
 - **物理压实**：`PagedKVCache.compact(seq, keep_mask)` 先拷出保留 K/V、再 `free_seq` 回收、按 `max(layer_len)` 重建块表（`head_offset` 归零、逻辑坐标重排到 `[0, layer_len)`）；逐层 `layer_len[l]` 跟踪每层有效长度，gather 按层读取。LIFO 回收保证释放后拿回同一批物理块、避免不同层搬运互相覆盖。
 - **触发**：`PhosModel.forward` 在 `end_append` 后、缓存超过 `_evict_threshold`（= `max(sink+window+1, round(max_seq_len·kv_budget))`）时调用 `_run_eviction()`；`none` 完全不触发。
 - **验收（C5，不变量 ⑦）**：下游 final-logits 余弦 ≥ 0.99（50% 预算）；原始注意力 L2 即便 oracle 也 ≈ 0.5，属指标固有性质，故以文献同款 logits / PPL 衡量。实测见 `BENCHMARKS.md` §5.4。
+
+---
+
+### 5.7 连续批处理调度器（T4-D）
+
+把多条序列的新 token **融合进一次前向**，是吞吐从「N 条串行」到「N 条并行」的关键（C6）。设计要点：
+
+- **`PhosModel.forward_step(seq_tokens: dict[int, np.ndarray]) -> dict[int, np.ndarray]`**：单次融合前向。
+  - 输入 `{seq_id: 新token ids}`（每条序列**仅本轮新产生的 token**，不含历史），输出每条序列**末位** token 的 logits。
+  - 内部把所有序列 token 拼成 `[N_total, d]` 矩阵，逐层计算 `q/k/v` 投影后**按 `seq_id` 切片隔离**：RoPE 绝对位置 `abs_start = _abs_dropped + cache_len(seq)` 逐序列独立；注意力对每条序列单独调用 `paged_gqa_attention(qs, cache, s, i, n_rep, starts[s])`，物理 KV 由 `block_tables[s]` 自然隔离。
+  - **残差守恒**：注意力输出只 `attn_x = concat(各序列 out)` 送 `o_proj`，再 `x = x + subln_attn * o`；`x`（残差）全程不覆盖，保证与逐条 `forward` 逐位一致（不变量①）。
+  - 三段式写入：`begin_append(s, T)`（每序列预留块）→ 逐层 `write` → 全部层结束后统一 `end_append(s)`。
+  - `dense` 模式无融合收益，自动降级为逐序列串行 `forward`；`eviction != none` 时禁用融合（两类动态 KV 结构不可同时混用），抛 `NotImplementedError`。
+
+- **`Scheduler`（`phosphorus/scheduler.py`）**：
+  - `generate_ids(prompts_ids, max_new_tokens, temperature, top_k, top_p, seed)`：把 `len(prompts) > max_seqs` 的请求**按波次（wave）切分**为每波 `≤ max_seqs` 条；每波 `model.reset()` 后用 `forward_step` 一次性 prefill + decode；每条序列用独立 `np.random.default_rng(seed + 全局下标)` 保证**融合批与逐条串行在随机采样下也逐位一致**。
+  - `dense` 后端同样支持（自动逐序列）；`eviction` 与连续批处理互斥，调度器始终走 `paged + none`。
+  - CLI：`phosphorus sched --model tiny.phos --prompts "..." "..." --max-seqs 8 [--bench]`，`--bench` 打印吞吐。
+
+- **关键数据结构变更**：`PagedKVCache.layer_len` 由 `[n_layer]`（全局共享写游标）重构为 `[n_seqs, n_layer]`，使每条序列在每一层都有独立有效长度——这是多序列融合写入不互相覆盖的前提。
+
+- **验收（C6/C7）**：8 条序列融合生成的 token id 与逐条串行**逐位一致**（`test_scheduler_greedy_matches_serial`）；融合吞吐 **2.35×**（1158.8 vs 492.8 tok/s，tiny 模型 8×40 tok，`test_scheduler_throughput_speedup` 守护 ≥ 2×）；采样端到端：同 seed 两次运行结果 `==`、随机采样（temp=0.9）与贪心 `!=`、top_k/top_p/temperature 行为由 `sampling.py` 单测兜底。
 
 ## 6. 自适应投机控制器（O2）
 

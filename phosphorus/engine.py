@@ -159,6 +159,7 @@ class PhosModel:
         kv_budget: float = 0.5,
         window_size: int = 32,
         sink_size: int = 4,
+        max_seqs: int = 1,
     ) -> None:
         """构造推理模型。
 
@@ -177,6 +178,11 @@ class PhosModel:
         `window_size`/`sink_size` 为强制保留的「最近窗口/注意力锚点」大小
         （StreamingLLM 的发现；其余三策略原版不保留 sink，本项目统一保留，
         属组合改进，已在 `docs/ALGORITHMS.md` A-8~A-11 标注）。
+
+        `max_seqs` 为连续批处理（T4-D）可并发的最大序列数：分页物理池按
+        `max_seqs × ⌈max_seq_len / block_size⌉ + 1` 个块分配，每条序列独占
+        至多 `⌈max_seq_len / block_size⌉` 个块。`forward_step` 把多序列的新
+        token 融合进一次前向（见该方法 docstring）。默认 1 = 单序列（与旧行为一致）。
         """
         if backend not in BACKENDS:
             raise ValueError(f"未知后端 {backend!r}，可选 {BACKENDS}")
@@ -214,20 +220,28 @@ class PhosModel:
         # 预计算 RoPE 表（覆盖最大序列）
         self._cos, self._sin = _build_rope(self.rope_theta, self.d_head, self.max_seq_len + 16)
         self.block_size = int(block_size)
+        self.max_seqs = int(max(1, max_seqs))
         if self.kv_mode == "paged":
             from .block_manager import BlockManager
             from .kv_cache import PagedKVCache
 
-            n_blocks = (
-                self.max_seq_len + self.block_size - 1
-            ) // self.block_size + 1  # +1 = null_block
+            # 物理池按「序列数 × 每序列块数」分配（每条序列独立占用至多
+            # blocks_per_seq 个块，互不共享——连续批处理 T4-D 的前提）。
+            blocks_per_seq = (self.max_seq_len + self.block_size - 1) // self.block_size
+            n_blocks = self.max_seqs * blocks_per_seq + 1  # +1 = null_block
             self._mgr = BlockManager(
                 n_blocks=n_blocks,
                 block_size=self.block_size,
-                n_seqs=1,
-                max_blocks_per_seq=n_blocks - 1,
+                n_seqs=self.max_seqs,
+                max_blocks_per_seq=blocks_per_seq,
             )
-            self.cache = PagedKVCache(self._mgr, self.n_layer, self.n_kv_head, self.d_head)
+            self.cache = PagedKVCache(
+                self._mgr,
+                self.n_layer,
+                self.n_kv_head,
+                self.d_head,
+                n_seqs=self.max_seqs,
+            )
         else:
             self._mgr = None
             self.cache = _KVCache(self.n_layer, self.n_head, self.d_head)
@@ -326,6 +340,7 @@ class PhosModel:
         kv_budget: float = 0.5,
         window_size: int = 32,
         sink_size: int = 4,
+        max_seqs: int = 1,
     ) -> PhosModel:
         return cls(
             load_phos(path),
@@ -337,6 +352,7 @@ class PhosModel:
             kv_budget=kv_budget,
             window_size=window_size,
             sink_size=sink_size,
+            max_seqs=max_seqs,
         )
 
     # ----------------------------- 工具 ----------------------------- #
@@ -548,9 +564,176 @@ class PhosModel:
         return logits.astype(np.float32)
 
     # ----------------------------- 生成 ----------------------------- #
-    def cache_len(self) -> int:
-        """当前 KV cache 中的 token 数（dense 与 paged 统一接口）。"""
-        return self.cache.mgr.seq_len(0) if self.kv_mode == "paged" else self.cache.len()
+    def cache_len(self, seq_id: int = 0) -> int:
+        """某序列 KV cache 中的 token 数（dense 与 paged 统一接口；默认 seq 0）。"""
+        if self.kv_mode == "paged":
+            return int(self.cache.mgr.seq_len(seq_id))
+        return self.cache.len()
+
+    # ----------------------------- T4-D 连续批处理 ----------------------------- #
+    def forward_step(self, seq_tokens: dict[int, np.ndarray]) -> dict[int, np.ndarray]:
+        """一步解码：把多个序列的新 token 融合进一次前向，返回各序列**末位** logits。
+
+        这是连续批处理（continuous batching）的计算核心：所有序列的投影/FFN
+        在 `[N_total, d]` 的大矩阵上**一次批量 GEMM** 完成（N_total = 全部活跃
+        token 数），仅注意力与 RoPE 按序列隔离（各序列只 attend 自己的 KV、
+        用各自的绝对位置）。与不变量 ⑨ 同源——paged 注意力本就支持多 `seq_id`
+        （`begin_append/write/gather` 均按 `seq_id` 索引），故融合不改变任何序列
+        的数值结果，纯属把 Python 层循环开销与 BLAS 批处理收益最大化。
+
+        参数
+        ----
+        seq_tokens: dict[seq_id -> np.ndarray[int64]]，每个序列 1..T_s token。
+            序列 id 必须 < 构造时的 `max_seqs`，且彼此不重复。
+
+        返回
+        ----
+        dict[seq_id -> np.ndarray[V]]：每个序列**最后一个** token 的 logits。
+
+        注意
+        ----
+        * 连续批处理 + KV 驱逐（T4-C）在 T4-D 不在支持范围：本方法要求
+          `eviction == "none"`（否则抛 NotImplementedError）；驱逐与多序列的
+          `_abs_dropped`/逐层分数耦合，留待后续独立任务。
+        * dense 模式退化为逐序列串行 `forward`（保持接口统一，但无融合收益）。
+        """
+        if self._evict is not None:
+            raise NotImplementedError(
+                "forward_step 暂不支持 KV 驱逐（eviction != 'none'）；"
+                "连续批处理请用 --eviction none"
+            )
+        if self.kv_mode != "paged":
+            # dense 路径：KV cache 是单序列共享的 `[1,H,T,Dh]`，多序列无法真正融合
+            # （会互相 attend 到对方的 KV）。退化为逐序列串行 forward（每次重置保证
+            # 隔离），保持接口统一但无融合收益；连续批处理的融合收益仅 paged 路径提供。
+            out: dict[int, np.ndarray] = {}
+            for s, toks in seq_tokens.items():
+                self.reset()
+                out[s] = self.forward(toks)[-1]
+            return out
+        if not seq_tokens:
+            return {}
+        # 统一为 int64 并校验 token 数
+        plan: list[tuple[int, np.ndarray, int]] = []
+        for s, toks in seq_tokens.items():
+            t = np.asarray(toks, dtype=np.int64).reshape(-1)
+            if t.shape[0] == 0:
+                raise ValueError(f"序列 {s} 的 token 数必须为 >= 1，收到 0")
+            plan.append((int(s), t, int(t.shape[0])))
+        plan.sort(key=lambda x: x[0])
+        ids = [p[0] for p in plan]
+        lens = [p[2] for p in plan]
+        n_total = sum(lens)
+
+        # ---- 每序列：缓存长度 / 绝对起点 / RoPE 表 / 滑动窗口守卫 --------- #
+        starts: dict[int, int] = {}
+        abs_starts: dict[int, int] = {}
+        rope: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        for s, _t, T in plan:
+            st = self.cache_len(s)
+            # 逻辑坐标守卫：单序列超过 max_seq_len 时丢最旧 token（与 forward 同语义）。
+            if st + T > self.max_seq_len:
+                drop = st + T - self.max_seq_len
+                if self.kv_mode == "paged":
+                    self.cache.drop_front(s, drop)
+                else:
+                    for li in range(self.n_layer):
+                        self.cache.k[li] = self.cache.k[li][:, :, drop:, :]
+                        self.cache.v[li] = self.cache.v[li][:, :, drop:, :]
+                st = self.cache_len(s)
+            starts[s] = st
+            # 无驱逐时 _abs_dropped 恒为 0，绝对位置 = 逻辑位置（与 forward 一致）。
+            abs_starts[s] = int(self._abs_dropped) + st
+            rope[s] = self._rope_slice(abs_starts[s], T)
+
+        # ---- 拼接全部 token 嵌入成一个 [N_total, d] 矩阵 ------------------- #
+        segs = [self.tok_emb[t] for _, t, _ in plan]
+        x = (
+            np.concatenate(segs, axis=0).astype(np.float32)
+            if n_total > 1
+            else segs[0].astype(np.float32)
+        )
+        # 各序列在 x 中的切片区间（用于把批量结果切回单序列）
+        offs: dict[int, tuple[int, int]] = {}
+        c = 0
+        for s, T in zip(ids, lens):
+            offs[s] = (c, c + T)
+            c += T
+
+        # ---- 预留物理块（多序列三段式 begin） ----------------------------- #
+        if self.kv_mode == "paged":
+            for s, _, T in plan:
+                if not self.cache.begin_append(s, T):
+                    raise RuntimeError(
+                        f"分页 KV 容量不足：序列 {s} 需追加 {T} token 但池已满"
+                        f"（max_seqs={self.max_seqs}, max_seq_len={self.max_seq_len}）"
+                    )
+
+        for i in range(self.n_layer):
+            p = f"layers.{i}."
+            h = self._rmsnorm(x, self.w[p + "attn_norm"])  # [N_total, d]
+            q = self._proj(h, p + "q_proj")  # [N_total, d_model]
+            k = self._proj(h, p + "k_proj")  # [N_total, dkv]
+            v = self._proj(h, p + "v_proj")
+
+            q_segs: list[np.ndarray] = []
+            for s, T in zip(ids, lens):
+                a, b = offs[s]
+                # reshape -> [1, n_head, T, dh]；K/V 保持 n_kv_head
+                qs = q[a:b].reshape(1, T, self.n_head, self.d_head).transpose(0, 2, 1, 3)
+                ks = k[a:b].reshape(1, T, self.n_kv_head, self.d_head).transpose(0, 2, 1, 3)
+                vs = v[a:b].reshape(1, T, self.n_kv_head, self.d_head).transpose(0, 2, 1, 3)
+                qs = _apply_rope(qs, rope[s][0], rope[s][1])
+                ks = _apply_rope(ks, rope[s][0], rope[s][1])
+                if self.kv_mode == "paged":
+                    self.cache.write(s, i, ks[0].transpose(1, 0, 2), vs[0].transpose(1, 0, 2))
+                    out = paged_gqa_attention(qs, self.cache, s, i, self.n_rep, starts[s])
+                else:
+                    kk = np.repeat(ks, self.n_rep, axis=1)
+                    vv = np.repeat(vs, self.n_rep, axis=1)
+                    k_full = np.concatenate([self.cache.k[i], kk], axis=2)
+                    v_full = np.concatenate([self.cache.v[i], vv], axis=2)
+                    self.cache.k[i] = k_full
+                    self.cache.v[i] = v_full
+                    scores = (qs @ k_full.transpose(0, 1, 3, 2)) / math.sqrt(self.d_head)
+                    if T > 1:
+                        mask = np.tril(np.ones((T, starts[s] + T), dtype=bool), k=starts[s])
+                        scores = np.where(mask[None, None, :, :], scores, -np.inf)
+                    attn = np.exp(scores - np.max(scores, axis=-1, keepdims=True))
+                    attn = attn / np.sum(attn, axis=-1, keepdims=True)
+                    out = attn @ v_full  # [1, H, T, dh]
+                q_segs.append(out.transpose(0, 2, 1, 3).reshape(T, self.d))
+            # 注意力输出拼接（仅用于 o_proj 融合）；残差 x 保持原输入不参与覆盖。
+            attn_x = np.concatenate(q_segs, axis=0)  # [N_total, d]
+
+            o = self._proj(attn_x, p + "o_proj")
+            x = x + self.w[p + "subln_attn"].astype(np.float32) * o
+
+            # FFN
+            h2 = self._rmsnorm(x, self.w[p + "ffn_norm"])
+            if self.act_relu2:
+                g = np.clip(self._proj(h2, p + "gate_proj"), 0, None) ** 2
+                u = self._proj(h2, p + "up_proj")
+                ffn = self._proj(g * u, p + "down_proj")
+            else:
+                g = self._proj(h2, p + "gate_proj")
+                u = self._proj(h2, p + "up_proj")
+                ff = g * (1.0 / (1.0 + np.exp(-u)))
+                ffn = self._proj(ff, p + "down_proj")
+            x = x + self.w[p + "subln_ffn"].astype(np.float32) * ffn
+
+        if self.kv_mode == "paged":
+            for s in ids:
+                self.cache.end_append(s)
+
+        x = x * self.norm_final
+        emb = self.tok_emb if self.tied else self.lm_head
+        logits = x @ emb.T  # [N_total, V]
+        out_logits: dict[int, np.ndarray] = {}
+        for s, _T in zip(ids, lens):
+            a, b = offs[s]
+            out_logits[s] = logits[b - 1]  # 末位 token 的 logits
+        return out_logits
 
     def _rope_slice(self, start: int, T: int) -> tuple[np.ndarray, np.ndarray]:
         """取 RoPE 表 [start:start+T]，必要时惰性扩容（绝对位置可超过 max_seq_len）。"""
@@ -569,7 +752,7 @@ class PhosModel:
         的候选段切分严格对齐。
         """
         pol = self._evict
-        n = int(self.cache.layer_len[i])
+        n = int(self.cache.layer_len[0, i])
         n_past = pol.n_past_of(n)
         W = pol.cfg.window_size
         if n_past <= 0:
@@ -601,7 +784,7 @@ class PhosModel:
             return
         masks = np.zeros((self.n_layer, n_total), dtype=bool)
         for i in range(self.n_layer):
-            kl = int(self.cache.layer_len[i])
+            kl = int(self.cache.layer_len[0, i])
             if kl <= 0:
                 continue
             if pol.name in ("snapkv", "pyramidkv"):
@@ -612,7 +795,7 @@ class PhosModel:
             masks[i, :kl] = pol.select(scores, budget, kl)
         if pol.name == "h2o":
             for i in range(self.n_layer):
-                kl = int(self.cache.layer_len[i])
+                kl = int(self.cache.layer_len[0, i])
                 sink = min(pol.cfg.sink_size, kl)
                 scored_hi = kl - min(pol.cfg.window_size, max(0, kl - sink))
                 n_past = scored_hi - sink

@@ -39,20 +39,24 @@ class PagedKVCache:
         n_layer: int,
         n_kv_head: int,
         d_head: int,
+        n_seqs: int = 1,
         dtype: np.dtype | type = np.float32,
     ) -> None:
         self.mgr = manager
         self.n_layer = int(n_layer)
         self.n_kv_head = int(n_kv_head)
         self.d_head = int(d_head)
+        self.n_seqs = int(n_seqs)
         self.dtype = np.dtype(dtype)
         self.kv = np.zeros(
             (manager.n_blocks, self.n_layer, 2, manager.block_size, self.n_kv_head, self.d_head),
             dtype=self.dtype,
         )
-        # 每层「有效 token 数」（逐层预算可不同，见 T4-C 驱逐）。
-        # `mgr.seq_len` 取各层最大值用于块表分配，读取以 layer_len 为准。
-        self.layer_len = np.zeros(self.n_layer, dtype=np.int32)
+        # 逐序列 × 逐层的「有效 token 数」（逐层预算可不同，见 T4-C 驱逐）。
+        # 这是连续批处理（T4-D）的关键：不同序列可有不同长度，KV 写入起点
+        # 必须按「该序列自己的长度」计算，而非全局共享。
+        # `mgr.seq_len[seq_id]` 取各层最大值用于块表分配，读取以 layer_len 为准。
+        self.layer_len = np.zeros((self.n_seqs, self.n_layer), dtype=np.int32)
         # 每条序列「已预留、尚未 end」的批次大小
         self._pending: dict[int, int] = {}
 
@@ -69,6 +73,10 @@ class PagedKVCache:
         self.kv[:] = 0
         self.layer_len[:] = 0
         self._pending.clear()
+
+    def length(self, seq_id: int, layer: int) -> int:
+        """某序列某层的有效 KV token 数。"""
+        return int(self.layer_len[seq_id, layer])
 
     # ----------------------------- 写 ----------------------------- #
     def can_append(self, seq_id: int, num_new_tokens: int) -> bool:
@@ -102,11 +110,12 @@ class PagedKVCache:
             raise RuntimeError(f"seq {seq_id} 没有活动批次——请先 begin_append")
         if pending != T:
             raise RuntimeError(f"seq {seq_id} 批次大小不一致：begin={pending}, write={T}")
-        # 本批次起点 = 首块偏移 + 该层已存长度（begin_append 已把 mgr.seq_len 增加 T，
-        # 但 layer_len[layer] 仍是「写入前」的值，二者在普通追加时相等）
-        start = int(self.mgr.head_offset[seq_id]) + int(self.layer_len[layer])
+        # 本批次起点 = 首块偏移 + 该序列该层已存长度（begin_append 已把
+        # mgr.seq_len 增加 T，但 layer_len[seq_id, layer] 仍是「写入前」的值，
+        # 普通追加时二者相等；多序列时各自独立，绝不共享全局长度）
+        start = int(self.mgr.head_offset[seq_id]) + int(self.layer_len[seq_id, layer])
         self._write_at(seq_id, layer, k_new, v_new, start)
-        self.layer_len[layer] += T
+        self.layer_len[seq_id, layer] += T
 
     def _write_at(
         self,
@@ -147,9 +156,10 @@ class PagedKVCache:
     def gather(self, seq_id: int, layer: int) -> tuple[np.ndarray, np.ndarray]:
         """读出 seq_id 在 layer 层的全部有效 K/V（各 [T, n_kv_head, d_head]）。
 
-        `T` 取该层的 `layer_len[layer]`（驱逐后各层长度可不同；块表按最大长度分配）。
+        `T` 取该序列该层的 `layer_len[seq_id, layer]`（驱逐后各层长度可不同；
+        块表按最大长度分配）。
         """
-        n = int(self.layer_len[layer])
+        n = int(self.layer_len[seq_id, layer])
         if n == 0:
             z = np.zeros((0, self.n_kv_head, self.d_head), dtype=self.dtype)
             return z, z.copy()
@@ -183,7 +193,7 @@ class PagedKVCache:
         """
         n = self.mgr.drop_tokens(seq_id, n)
         for li in range(self.n_layer):
-            self.layer_len[li] = max(0, int(self.layer_len[li]) - n)
+            self.layer_len[seq_id, li] = max(0, int(self.layer_len[seq_id, li]) - n)
         return n
 
     def compact(self, seq_id: int, keep_masks: np.ndarray) -> int:
@@ -215,7 +225,7 @@ class PagedKVCache:
         kb: list[np.ndarray | None] = [None] * self.n_layer
         vb: list[np.ndarray | None] = [None] * self.n_layer
         for li in range(self.n_layer):
-            kl = int(self.layer_len[li])
+            kl = int(self.layer_len[seq_id, li])
             k, v = self.gather(seq_id, li)  # [kl, n_kv, Dh]
             mk = m[li, :kl]
             kb[li] = np.ascontiguousarray(k[mk])
@@ -227,5 +237,5 @@ class PagedKVCache:
             raise RuntimeError(f"压缩后重建失败：需要 {n_new} token 的物理块空间")
         for li in range(self.n_layer):
             self._write_at(seq_id, li, kb[li], vb[li], 0)  # 写到 [0, kept_l)
-        self.layer_len[:] = kept
+        self.layer_len[seq_id, :] = kept
         return n - n_new

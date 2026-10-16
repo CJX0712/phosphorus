@@ -112,6 +112,7 @@ def cmd_generate(a: argparse.Namespace) -> None:
         kv_budget=getattr(a, "kv_budget", 0.5),
         window_size=getattr(a, "window_size", 32),
         sink_size=getattr(a, "sink_size", 4),
+        max_seqs=getattr(a, "max_seqs", 1),
     )
     t0 = time.time()
     text = model.generate(
@@ -127,6 +128,43 @@ def cmd_generate(a: argparse.Namespace) -> None:
         print(text)
     if a.bench:
         print(f"\n[bench] 生成 {cfg.decode.max_new_tokens} token 用时 {time.time() - t0:.2f}s")
+
+
+def cmd_sched(a: argparse.Namespace) -> None:
+    """连续批处理调度：一次融合前向服务多条 prompt（T4-D）。"""
+    from .engine import PhosModel
+    from .scheduler import Scheduler
+
+    cfg = build_config_from_args(a)
+    model = PhosModel.from_file(
+        a.model,
+        backend=getattr(a, "backend", "fp32"),
+        kv_mode="paged",  # 连续批处理依赖 paged 多 seq_id 隔离
+        eviction="none",  # T4-D 范围：连续批处理 + 驱逐不混用
+        max_seqs=getattr(a, "max_seqs", 8),
+    )
+    prompts = list(a.prompts)
+    if not prompts:
+        raise SystemExit("--prompts 至少提供一条")
+    sched = Scheduler(model, max_seqs=getattr(a, "max_seqs", 8))
+    t0 = time.time()
+    texts = sched.generate(
+        prompts,
+        max_new_tokens=cfg.decode.max_new_tokens,
+        temperature=cfg.decode.temperature,
+        top_k=cfg.decode.top_k,
+        top_p=cfg.decode.top_p,
+        seed=cfg.decode.seed,
+    )
+    dt = time.time() - t0
+    total_tok = sum(len(t) for t in texts)
+    print(f"[sched] {len(prompts)} 条 prompt，融合前向并发 max_seqs={sched.max_seqs}")
+    for i, t in enumerate(texts):
+        head = t[:80].replace("\n", " ")
+        print(f"[{i}] {head!r}")
+    if a.bench:
+        tps = total_tok / max(dt, 1e-9)
+        print(f"\n[bench] {total_tok} 新生成 token / {dt:.3f}s = {tps:.1f} tok/s")
 
 
 def cmd_bench(a: argparse.Namespace) -> None:
@@ -252,6 +290,9 @@ def build_parser() -> argparse.ArgumentParser:
     pg.add_argument("--kv-budget", type=float, default=0.5, help="驱逐保留比例（默认 0.5）")
     pg.add_argument("--window-size", type=int, default=32, help="强制保留的最近窗口大小")
     pg.add_argument("--sink-size", type=int, default=4, help="强制保留的注意力锚点数")
+    pg.add_argument(
+        "--max-seq", type=int, default=1, dest="max_seqs", help="连续批处理并发序列数（T4-D）"
+    )
     pg.add_argument("--max_new_tokens", type=int, default=None)
     pg.add_argument("--temperature", type=float, default=None)
     pg.add_argument("--top_k", type=int, default=None)
@@ -277,7 +318,30 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--kv-budget", type=float, default=0.5, help="驱逐保留比例（默认 0.5）")
     pb.add_argument("--window-size", type=int, default=32, help="强制保留的最近窗口大小")
     pb.add_argument("--sink-size", type=int, default=4, help="强制保留的注意力锚点数")
+    pb.add_argument(
+        "--max-seq", type=int, default=1, dest="max_seqs", help="连续批处理并发序列数（T4-D）"
+    )
     pb.set_defaults(func=cmd_bench)
+
+    ps = sub.add_parser("sched", help="连续批处理生成（T4-D）：多条 prompt 一次融合前向")
+    ps.add_argument("--model", required=True)
+    ps.add_argument(
+        "--prompts",
+        nargs="+",
+        required=True,
+        help="一条或多条 prompt（空格分隔；含空格的 prompt 用引号包裹）",
+    )
+    ps.add_argument("--config", default=None)
+    ps.add_argument("--backend", default="fp32", choices=["fp32", "int8", "tl", "i2s"])
+    ps.add_argument(
+        "--max-seqs", type=int, default=8, dest="max_seqs", help="并发序列上限（物理池按此分配）"
+    )
+    ps.add_argument("--max_new_tokens", type=int, default=None)
+    ps.add_argument("--temperature", type=float, default=None)
+    ps.add_argument("--top_k", type=int, default=None)
+    ps.add_argument("--top_p", type=float, default=None)
+    ps.add_argument("--bench", action="store_true")
+    ps.set_defaults(func=cmd_sched)
 
     pk = sub.add_parser("tokenize", help="分词器训练 / 编解码")
     pk.add_argument("--action", required=True, choices=["train", "encode", "decode", "roundtrip"])

@@ -154,10 +154,11 @@
   - **块大小 16**（vLLM 默认 16 on GPU，但 CPU 小模型下我们实测 16 vs 32 vs 64 的吞吐，选最优）——T4-B 实测 4/16/32/64 数值一致，默认 16。
   - **只存 `n_kv_head` 份**：读取时 `np.repeat` 展开（精确拷贝），注意力计算量随 GQA 比下降；dense 参考则先展开后计算，两者逐元素等价（不变量 ⑨）。
   - **`head_offset` 滑动窗口**：丢弃任意数量 token 只回收整块 + 累加首块偏移，逻辑→物理映射永不错位（vLLM 滑动窗口后端同款思路）。
-  - KV int8 量化 + per-block scale（`flags.KV_INT8`）——🔜 未实现（当前 fp32，留待 T4-C 之后按需启用）。
-- **落地**：`phosphorus/block_manager.py`、`phosphorus/kv_cache.py`、`phosphorus/attention.py`、`phosphorus/engine.py`（`kv_mode`/`--kv`）；测试 `tests/test_paged_kv.py`（20 条）、`tests/test_engine_paged.py`（7 条）。连续批处理 `scheduler.py` 🔜 T4-D。
-- **实测数字**：`[已验证]` — 内核级 paged vs dense 最大差 < 1e-5；引擎级 logits 差 < 1e-4、argmax 100% 一致；块管理 10,000 次分配/回收无泄漏；吞吐见 `BENCHMARKS.md` §5：tl prefill **1.30×**（paged 更快，注意力只算 n_kv 头）、i2s decode 0.88×（gather 固定开销未被 T=1 摊销）；batch=8 吞吐与碎片率 🔜 T4-D。
-- **状态**：`[已验证]`（分页 KV + 块管理 + 注意力）/ `[骨架]`（连续批处理，T4-D）
+  - KV int8 量化 + per-block scale（`flags.KV_INT8`）——🔜 未实现（当前 fp32，留待 T4-E 之后按需启用）。
+  - **融合连续批处理（T4-D 原创工程化）**：`PhosModel.forward_step({seq_id: 新token})` 把 N 条序列的新 token 拼成 `[N_total, d]` 一次前向，逐层按 `seq_id` 切片隔离（RoPE 绝对位置、注意力、`block_tables` 物理 KV 均逐序列独立），三段式写入 `begin_append→write→end_append`；`Scheduler` 按 wave 切分 > `max_seqs` 的请求并逐序列 `np.random.default_rng(seed+全局下标)` 保证随机采样下与逐条串行逐位一致。关键支撑：`PagedKVCache.layer_len` 重构为 `[n_seqs, n_layer]`，使每条序列每层拥有独立有效长度。
+- **落地**：`phosphorus/block_manager.py`、`phosphorus/kv_cache.py`、`phosphorus/attention.py`、`phosphorus/engine.py`（`kv_mode`/`--kv` + `forward_step`）；连续批处理 `phosphorus/scheduler.py`；测试 `tests/test_paged_kv.py`（20 条）、`tests/test_engine_paged.py`（7 条）、`tests/test_scheduler.py`（8 条：融合数值正确性 / C6 等价 / C6 吞吐 / C7 采样）。
+- **实测数字**：`[已验证]` — 内核级 paged vs dense 最大差 < 1e-5；引擎级 logits 差 < 1e-4、argmax 100% 一致；块管理 10,000 次分配/回收无泄漏；吞吐见 `BENCHMARKS.md` §5：tl prefill **1.30×**（paged 更快，注意力只算 n_kv 头）、i2s decode 0.88×（gather 固定开销未被 T=1 摊销）；**连续批处理 8 条融合前向吞吐 2.35× 逐条串行**（1158.8 vs 492.8 tok/s，tiny 模型 8×40 tok，`test_scheduler_throughput_speedup` 守护 ≥ 2×），token id 与逐条串行逐位一致。
+- **状态**：`[已验证]`（分页 KV + 块管理 + 注意力 + 连续批处理）
 
 ---
 
