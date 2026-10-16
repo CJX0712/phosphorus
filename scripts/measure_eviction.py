@@ -1,5 +1,6 @@
 """T4-C 驱逐保真度实测（修正 q_start 后复测，用于文档 BENCHMARKS）。"""
 import numpy as np
+
 from phosphorus.engine import PhosModel
 
 CKPT = "ckpt/tiny.phos"
@@ -30,7 +31,7 @@ def fidelity_at(budget):
 
 
 def budget_conservation():
-    from phosphorus.eviction import PyramidKVPolicy, EvictionConfig
+    from phosphorus.eviction import EvictionConfig, PyramidKVPolicy
     out = []
     for n_layer, seq_len, ratio in [(3, 256, 0.5), (8, 256, 0.5), (32, 1000, 0.25), (8, 100, 0.75)]:
         pol = PyramidKVPolicy(EvictionConfig(budget_ratio=ratio))

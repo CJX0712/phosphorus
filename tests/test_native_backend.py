@@ -45,7 +45,7 @@ except NativeUnavailable:  # pragma: no cover - 环境无 ziglang 时整套跳�
 
 pytestmark = pytest.mark.skipif(KERN is None, reason="native 后端不可用（未装 ziglang?）")
 
-AVX2 = PHOS_FLAG_AVX2 if KERN.cpu_has_avx2() else 0
+AVX2 = PHOS_FLAG_AVX2 if (KERN is not None and KERN.cpu_has_avx2()) else 0
 SCALAR = PHOS_FLAG_SCALAR
 
 _SHAPES = [(1, 1), (1, 24), (7, 25), (128, 23), (128, 24), (192, 128), (256, 100), (384, 300)]
