@@ -25,6 +25,17 @@ from phosphorus.eviction import (
 )
 from phosphorus.kv_cache import PagedKVCache
 
+CKPT = "ckpt/tiny.phos"
+
+
+@pytest.fixture(scope="module")
+def ckpt_path() -> str:
+    import os
+
+    if not os.path.exists(CKPT):
+        pytest.skip(f"{CKPT} 不存在（请先跑 make train-fast 或 scripts/setup）")
+    return CKPT
+
 
 # --------------------------------------------------------------------------- #
 # 1. 预算守恒（Σ == L·C ± 1）
@@ -193,11 +204,11 @@ def test_compact_noop():
 # --------------------------------------------------------------------------- #
 # 4. 下游保真度（C5 验收）：50% 预算下 final-logits 余弦 ≥ 0.99
 # --------------------------------------------------------------------------- #
-def test_downstream_fidelity_at_50pct():
+def test_downstream_fidelity_at_50pct(ckpt_path):
     pref = list(range(10, 210))  # 200 token 预填充（触发压缩）
     dec = list(range(210, 230))  # 20 个 decode
     # 无驱逐参考（dense 全量，作为 ground truth）
-    mf = PhosModel.from_file("ckpt/tiny.phos", eviction="none")
+    mf = PhosModel.from_file(ckpt_path, eviction="none")
     mf.forward(np.array(pref, dtype=np.int64))
     ref_logits = []
     for t in dec:
@@ -207,7 +218,7 @@ def test_downstream_fidelity_at_50pct():
         return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-12))
 
     for pol in ["snapkv", "pyramidkv", "h2o", "streamingllm"]:
-        m = PhosModel.from_file("ckpt/tiny.phos", eviction=pol, kv_budget=0.5)
+        m = PhosModel.from_file(ckpt_path, eviction=pol, kv_budget=0.5)
         m.forward(np.array(pref, dtype=np.int64))
         coss = []
         for j, t in enumerate(dec):
@@ -218,18 +229,18 @@ def test_downstream_fidelity_at_50pct():
         assert mean_cos >= 0.99, f"{pol} 50% 预算下游余弦={mean_cos:.4f} < 0.99"
 
 
-def test_none_control_no_eviction():
+def test_none_control_no_eviction(ckpt_path):
     pref = list(range(10, 210))
-    m = PhosModel.from_file("ckpt/tiny.phos", eviction="none")
+    m = PhosModel.from_file(ckpt_path, eviction="none")
     m.forward(np.array(pref, dtype=np.int64))
     # none 不驱逐：缓存保持全量（无任何压缩）
     assert m.cache_len() == len(pref)
 
 
-def test_eviction_reduces_cache():
+def test_eviction_reduces_cache(ckpt_path):
     pref = list(range(10, 210))
     for pol in ["snapkv", "pyramidkv", "h2o", "streamingllm"]:
-        m = PhosModel.from_file("ckpt/tiny.phos", eviction=pol, kv_budget=0.5)
+        m = PhosModel.from_file(ckpt_path, eviction=pol, kv_budget=0.5)
         m.forward(np.array(pref, dtype=np.int64))
         # 预填充 200 触发压缩：缓存应明显小于全量 200
         assert m.cache_len() < 200
