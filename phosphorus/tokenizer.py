@@ -16,9 +16,11 @@
 
 from __future__ import annotations
 
+import heapq
 import json
 import math
 import unicodedata
+from collections import Counter
 from pathlib import Path
 
 # --------------------------------------------------------------------------- #
@@ -166,48 +168,66 @@ class Tokenizer:
         # 无损不变量（⑤）。base vocab 齐备后，任何文本至少能逐字节编解码。
         vocab: list[str] = [_ENC[b] for b in range(256)]
         sym2id = {s: i for i, s in enumerate(vocab)}
-        # 预分词并把每个 word 表示为符号列表
-        words: list[list[str]] = []
+        # 预分词并把每个 word 表示为符号列表（按频次去重，只保留唯一词 + 词频）
+        word_freq: Counter = Counter()
         for w in _pretokenize(text):
-            ws = [_ENC[b] for b in w.encode("utf-8")]
-            if ws:
-                words.append(ws)
+            syms = tuple(_ENC[b] for b in w.encode("utf-8"))
+            if syms:
+                word_freq[syms] += 1
+        words: list[tuple[str, ...]] = list(word_freq.keys())
+        # 词频按 word_id 索引（不能用「符号元组 -> 频次」字典：合并后元组会变，
+        # 查表会得到 0，导致计数永远无法扣减——这是增量式 BPE 最容易踩的坑）。
+        freqs: list[int] = [word_freq[w] for w in words]
+
+        # ---- Sennrich 2016 增量式合并：pair 计数 + 反向索引 + 懒失效最大堆 ----
+        # 朴素实现每轮都要重扫全语料（O(merges × 语料长度)），8192 词表下不可行；
+        # 这里维护 pair -> count 与 pair -> 受影响词集合，每轮只更新命中该 pair 的词，
+        # 并用最大堆取最高频 pair（堆中过期条目在弹出时按当前计数校验后丢弃）。
+        pair_counts: Counter = Counter()
+        where: dict[tuple[str, str], set[int]] = {}
+        for wid, syms in enumerate(words):
+            f = freqs[wid]
+            for p in zip(syms[:-1], syms[1:]):
+                pair_counts[p] += f
+                where.setdefault(p, set()).add(wid)
+        heap: list[tuple[int, str, str]] = [(-c, a, b) for (a, b), c in pair_counts.items()]
+        heapq.heapify(heap)
 
         merges: list[tuple[str, str]] = []
-        ranks: dict[tuple[str, str], int] = {}
         target_merges = max(0, vocab_size - len(vocab))
-        from collections import Counter
-
-        while len(merges) < target_merges:
-            # 统计相邻对
-            pair_counts: Counter = Counter()
-            for word in words:
-                for a, b in zip(word[:-1], word[1:]):
-                    pair_counts[(a, b)] += 1
-            if not pair_counts:
-                break
-            # 取频次最高的对
-            best = max(pair_counts.items(), key=lambda kv: (kv[1], kv[0]))
-            a, b = best[0]
-            merges.append((a, b))
-            ranks[(a, b)] = len(merges) - 1
-            new_id = len(vocab)
-            vocab.append(a + b)
-            sym2id[a + b] = new_id
-            # 应用该 merge 到所有 word
-            new_words: list[list[str]] = []
-            for word in words:
-                if len(word) < 2:
-                    new_words.append(word)
-                    continue
-                nw: list[str] = [word[0]]
-                for sym in word[1:]:
-                    if nw[-1] == a and sym == b:
-                        nw[-1] = a + b
+        while len(merges) < target_merges and heap:
+            negc, a, b = heapq.heappop(heap)
+            pair = (a, b)
+            if pair_counts.get(pair, 0) != -negc or pair_counts[pair] <= 0:
+                continue  # 堆中过期条目（计数已被后续合并改动）
+            merges.append(pair)
+            merged_sym = a + b
+            if merged_sym not in sym2id:
+                sym2id[merged_sym] = len(vocab)
+                vocab.append(merged_sym)
+            for wid in list(where.pop(pair, ())):
+                syms = words[wid]
+                f = freqs[wid]
+                for q in zip(syms[:-1], syms[1:]):
+                    pair_counts[q] -= f
+                    s = where.get(q)
+                    if s is not None:
+                        s.discard(wid)
+                new_syms: list[str] = []
+                i, n = 0, len(syms)
+                while i < n:
+                    if i < n - 1 and syms[i] == a and syms[i + 1] == b:
+                        new_syms.append(merged_sym)
+                        i += 2
                     else:
-                        nw.append(sym)
-                new_words.append(nw)
-            words = new_words
+                        new_syms.append(syms[i])
+                        i += 1
+                new_tuple = tuple(new_syms)
+                words[wid] = new_tuple
+                for q in zip(new_tuple[:-1], new_tuple[1:]):
+                    pair_counts[q] += f
+                    where.setdefault(q, set()).add(wid)
+                    heapq.heappush(heap, (-pair_counts[q], q[0], q[1]))
 
         # 特殊 token 追加到词表尾部
         for name in specials:

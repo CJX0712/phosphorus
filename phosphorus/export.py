@@ -263,3 +263,63 @@ def export_model(
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_bytes(blob)
     return blob
+
+
+# --------------------------------------------------------------------------- #
+# 检视（`phosphorus quantize --inspect`，调试 .phos 的主要工具）               #
+# --------------------------------------------------------------------------- #
+
+_DTYPE_NAMES = {DT_F32: "f32", DT_F16: "f16", DT_I32: "i32", DT_TERNARY: "ternary_packed"}
+_PACK_NAMES = {PACK_NONE: "none", PACK_TERNARY: "ternary_5bit_v1"}
+
+
+def inspect_phos(path: str | Path) -> str:
+    """读取 .phos 并生成人类可读的结构报告（header + 张量索引 + 完整性校验）。"""
+    blob = Path(path).read_bytes()
+    lines: list[str] = []
+    lines.append(f"文件: {path}  ({len(blob):,} bytes)")
+    if blob[0:4] != MAGIC:
+        return "\n".join(lines + ["错误: magic 不是 PHOS"])
+    ver = f"{blob[4]}.{blob[5]}.{blob[6]}"
+    n_tensor = struct.unpack_from("<I", blob, 112)[0]
+    crc_stored = struct.unpack_from("<I", blob, 176)[0]
+    crc_calc = zlib.crc32(bytes(blob[0:176])) & 0xFFFFFFFF
+    lines.append(f"版本: {ver}  对齐: {blob[7]}  张量数: {n_tensor}")
+    lines.append(
+        f"结构: n_layer={struct.unpack_from('<I', blob, 32)[0]} "
+        f"d_model={struct.unpack_from('<I', blob, 36)[0]} "
+        f"n_head={struct.unpack_from('<I', blob, 40)[0]} "
+        f"n_kv_head={struct.unpack_from('<I', blob, 44)[0]} "
+        f"d_ff={struct.unpack_from('<I', blob, 52)[0]} "
+        f"vocab={struct.unpack_from('<I', blob, 56)[0]}"
+    )
+    lines.append(
+        f"量化: quant_enum={struct.unpack_from('<I', blob, 76)[0]} "
+        f"pack_scheme={_PACK_NAMES.get(struct.unpack_from('<I', blob, 92)[0], '?')} "
+        f"hgf_rank={struct.unpack_from('<I', blob, 96)[0]}"
+    )
+    lines.append(f"crc32_header: stored=0x{crc_stored:08x} calc=0x{crc_calc:08x} "
+                 f"{'OK' if crc_stored == crc_calc else 'MISMATCH'}")
+    lines.append("")
+    lines.append(f"{'#':>3} {'name':<34} {'dtype':<15} {'shape':<16} {'offset':>10} {'bytes':>10}")
+    total_packed = 0
+    for i in range(n_tensor):
+        base = HEADER_BYTES + i * INDEX_ENTRY_BYTES
+        name = blob[base : base + 32].split(b"\x00")[0].decode("utf-8")
+        dtype = blob[base + 32]
+        ndim = blob[base + 33]
+        shape = [struct.unpack_from("<I", blob, base + 36 + 4 * s)[0] for s in range(4)][:ndim]
+        off = struct.unpack_from("<Q", blob, base + 64)[0]
+        nb = struct.unpack_from("<Q", blob, base + 72)[0]
+        if off + nb > len(blob):
+            lines.append(f"  !! 张量 {name} 越界: off={off} bytes={nb} file={len(blob)}")
+        if dtype == DT_TERNARY:
+            total_packed += nb
+        lines.append(
+            f"{i:>3} {name:<34} {_DTYPE_NAMES.get(dtype, str(dtype)):<15} "
+            f"{str(shape):<16} {off:>10} {nb:>10}"
+        )
+    lines.append("")
+    lines.append(f"三值打包张量总字节: {total_packed:,} "
+                 f"（占文件 {total_packed / max(len(blob), 1) * 100:.1f}%）")
+    return "\n".join(lines)

@@ -36,6 +36,16 @@ extern "C" {
 #define PHOS_BYTES_PER_CHUNK 5
 #define PHOS_LUT_SIZE 16 /* 14 项有效 + 2 项补齐，恰好 16（SIMD 对齐） */
 
+/*
+ * 每个内核末尾的 `flags` 位开关。
+ * 为什么不用 `phos_set_simd()` 全局开关：约束 #1 要求纯函数、可重入、无全局状态，
+ * 全局开关会让 row-block 线程池并行出现数据竞争，也让「标量权威路径」无法与 SIMD
+ * 在同一进程内并列对比。故把开关做成显式入参（由 software-architect-2 提出）。
+ */
+#define PHOS_FLAG_SCALAR 1u /* 强制走标量路径（位精确权威实现） */
+#define PHOS_FLAG_AVX2 2u   /* 允许 AVX2 路径（需要运行时 CPU 探测已通过） */
+#define PHOS_FLAG_NEON 4u   /* 允许 ARM NEON 路径 */
+
 #ifdef _WIN32
 #define PHOS_API __declspec(dllexport)
 #else
@@ -54,11 +64,17 @@ extern "C" {
  * xq       [K]         int8 量化激活（值域 [-127, 127]）
  * wscale   [N]         权重 per-channel scale
  * sx                   激活 per-token scale
- * y        [N]         输出
- * k0, k1               行块切分 [k0, k1)，用于线程池并行
+ * y        [N]         输出（fp32）
+ * n0, n1               行块切分 [n0, n1)，切的是 **N 维（输出行）**，不是 K 维
+ *                      —— 切 K 维会破坏累加完整性（ARCHITECTURE.md §5.1）
+ * flags                PHOS_FLAG_* 位掩码
+ *
+ * 注意：f32 版本无法与 NumPy 参考逐位相等（C 是 fp32 左结合，NumPy 参考是 float64）。
+ * 位精确断言一律走下面的 `*_i32` 整数域版本。
  */
 PHOS_API int phos_tl_gemm_f32(const uint8_t *Wp, const int8_t *xq, const float *wscale,
-                              float sx, float *y, int N, int K_pad, int k0, int k1);
+                              float sx, float *y, int N, int K_pad, int n0, int n1,
+                              unsigned flags);
 
 /*
  * I2_S（int2 + scale）GEMM：u8 x i8 点积 + 零点校正，算力受限场景（prefill）首选。
@@ -67,7 +83,18 @@ PHOS_API int phos_tl_gemm_f32(const uint8_t *Wp, const int8_t *xq, const float *
  */
 PHOS_API int phos_i2s_gemm_f32(const int8_t *Wi8, const uint8_t *xu8, const int32_t *row_wsum,
                                const float *wscale, float sx, float *y, int N, int K,
-                               int k0, int k1);
+                               int n0, int n1, unsigned flags);
+
+/*
+ * 整数域输出版本 —— 位精确性的可观测锚点（不变量 ①）。
+ * `y32[n] = sum_j W[n,j] * xq[j]`，纯 int32 累加，不做任何浮点缩放。
+ * native.tl_i32 == native.i2s_i32 == numpy int32_reference 必须是逐位相等。
+ */
+PHOS_API int phos_tl_gemm_i32(const uint8_t *Wp, const int8_t *xq, int32_t *y32, int N,
+                              int K_pad, int n0, int n1, unsigned flags);
+
+PHOS_API int phos_i2s_gemm_i32(const int8_t *Wi8, const uint8_t *xu8, const int32_t *row_wsum,
+                               int32_t *y32, int N, int K, int n0, int n1, unsigned flags);
 
 /*
  * 从 5-bit 打包流解出 n_groups 组（每组 3 个三值权重），写入 out[3*n_groups]。

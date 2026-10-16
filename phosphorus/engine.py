@@ -24,8 +24,17 @@ import math
 
 import numpy as np
 
+from .gemm import gemm_int8, tl_acc_i32
 from .loader import PhosFile, load_phos
+from .packing import unpack_code5
 from .sampling import sample as _sample
+
+# 四种 GEMM 后端（ARCHITECTURE.md §5）。
+#   fp32 —— 反量化后的 fp32 基线，与 torch QAT 前向逐元素等价（不变量 ⑦ 的对照面）
+#   int8 —— 权重/激活各自 absmax 量化到 int8，int32 累加（精度对照用）
+#   tl   —— 真·LUT：直接吃 5-bit 打包 code5，查 14 项 LUT，无乘法
+#   i2s  —— 真·零点校正：int8 镜像权重 × uint8 激活 − 128·row_wsum
+BACKENDS: tuple[str, ...] = ("fp32", "int8", "tl", "i2s")
 
 
 def _quant_per_token(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -46,20 +55,34 @@ def _ternary_gemm_fp32(W: np.ndarray, w_scale: np.ndarray, x: np.ndarray) -> np.
     return (Wd @ x.T).T  # [T, out]
 
 
-def _ternary_gemm_int8(
-    W: np.ndarray, w_scale: np.ndarray, xq: np.ndarray, x_scale: np.ndarray
-) -> np.ndarray:
-    """真·BitNet 路径：out[T,out] = (W_int8 @ xq_int8.T) * w_scale * x_scale。
-
-    int8 激活量化是部署态的近似（量化误差来源，对应风险 R6 的 PPL 退化）。
-    """
-    acc = W.astype(np.int32) @ xq.astype(np.int32).T  # [out, T]
-    out = (
+def _ternary_gemm_i2s(W: np.ndarray, w_scale: np.ndarray, xq: np.ndarray, x_scale: np.ndarray):
+    """I2_S 路径（向量化）：out[t,n] = (Σ_j W[n,j]·(xq[t,j]+128) − 128·row_wsum[n]) · s。"""
+    W32 = np.asarray(W, dtype=np.int32)
+    xu8 = np.asarray(xq, dtype=np.int32) + 128
+    row_sum = W32.sum(axis=1)
+    acc = (W32 @ xu8.T) - (128 * row_sum).reshape(-1, 1)  # [out, T]
+    return (
         acc.astype(np.float64)
-        * w_scale.astype(np.float64)[:, None]
-        * x_scale.astype(np.float64)[None, :]
-    )
-    return out.astype(np.float32).T  # [T, out]
+        * np.asarray(w_scale, dtype=np.float64).reshape(-1, 1)
+        * np.asarray(x_scale, dtype=np.float64).reshape(1, -1)
+    ).astype(np.float32).T  # [T, out]
+
+
+def _ternary_gemm_tl(codes: np.ndarray, K: int, w_scale: np.ndarray, xq, x_scale) -> np.ndarray:
+    """TL 路径（真·查表）：逐 token 用 14 项 LUT 累加。
+
+    NumPy 无法把「按 code5 查表」向量化到 batch 维（每个 token 的激活不同，
+    LUT 也不同），故逐 token 调用 `tl_acc_i32`——这正是 decode（T=1）的形态。
+    prefill 走 i2s 更快，但两条路径在 int32 域逐位相等（不变量 ①）。
+    """
+    xq = np.asarray(xq, dtype=np.int8)
+    out = np.zeros((xq.shape[0], codes.shape[0]), dtype=np.float32)
+    for t in range(xq.shape[0]):
+        acc = tl_acc_i32(codes, xq[t], K)
+        out[t] = (acc.astype(np.float64) * w_scale.astype(np.float64) * float(x_scale[t])).astype(
+            np.float32
+        )
+    return out
 
 
 class _KVCache:
@@ -104,9 +127,18 @@ def _apply_rope(q: np.ndarray, cos: np.ndarray, sin: np.ndarray) -> np.ndarray:
 class PhosModel:
     """加载 .phos 并执行推理的纯 numpy 模型。"""
 
-    def __init__(self, phos: PhosFile, quant_act: bool = False) -> None:
+    def __init__(self, phos: PhosFile, backend: str = "fp32") -> None:
+        """构造推理模型。
+
+        backend ∈ {"fp32", "int8", "tl", "i2s"}（见模块顶 `BACKENDS`）。
+        默认 `fp32`：反量化后做 fp32 矩阵乘，与 torch QAT 前向逐元素等价，
+        是不变量 ⑦（engine ↔ torch 相对误差 < 5%）的对照面。
+        `tl` / `i2s` 是部署态的整数路径，二者在 int32 域逐位相等。
+        """
+        if backend not in BACKENDS:
+            raise ValueError(f"未知后端 {backend!r}，可选 {BACKENDS}")
+        self.backend = backend
         self.phos = phos
-        self.quant_act = quant_act  # False=忠实 fp32 激活（匹配 torch）；True=真·BitNet int8 激活
         h = phos.header
         self.d = int(h["d_model"])
         self.n_layer = int(h["n_layer"])
@@ -150,11 +182,25 @@ class PhosModel:
             "up_proj",
             "down_proj",
         )
+        # TL 后端需要 5-bit 打包流的 code5；按张量惰性解出并缓存。
+        self._packed = phos.raw
+        self._codes: dict[str, np.ndarray] = {}
+
+    def _codes_of(self, wname: str) -> np.ndarray:
+        """取某三值权重的 code5 数组 [out, ng]（惰性构建 + 缓存）。"""
+        if wname not in self._codes:
+            if wname not in self._packed:
+                raise KeyError(f"{wname} 无打包字节（该 .phos 不含原始 5-bit 流）")
+            W = self.w[wname]
+            self._codes[wname] = unpack_code5(self._packed[wname], W.shape[0], W.shape[1]).astype(
+                np.int64
+            )
+        return self._codes[wname]
 
     # ----------------------------- 工厂 ----------------------------- #
     @classmethod
-    def from_file(cls, path) -> PhosModel:
-        return cls(load_phos(path))
+    def from_file(cls, path, backend: str = "fp32") -> PhosModel:
+        return cls(load_phos(path), backend=backend)
 
     # ----------------------------- 工具 ----------------------------- #
     def _rmsnorm(self, x: np.ndarray, w: np.ndarray) -> np.ndarray:
@@ -170,11 +216,17 @@ class PhosModel:
         wname = name + ".weight"
         W = self.w[wname].astype(np.int32)
         w_scale = self.scales.get(wname, np.ones(W.shape[0], dtype=np.float32))
-        if self.quant_act:
-            xq, x_scale = _quant_per_token(x)
-            y = _ternary_gemm_int8(W, w_scale, xq, x_scale)
-        else:
+        if self.backend == "fp32":
             y = _ternary_gemm_fp32(W, w_scale, x)
+        elif self.backend == "int8":
+            # int8 后端：权重先反量化为 fp32，再与激活各自 absmax 量化到 int8
+            y = gemm_int8(W.astype(np.float32) * w_scale.reshape(-1, 1), x)
+        else:
+            xq, x_scale = _quant_per_token(x)
+            if self.backend == "i2s":
+                y = _ternary_gemm_i2s(W, w_scale, xq, x_scale)
+            else:  # "tl"：真·LUT，直接吃打包流解出的 code5
+                y = _ternary_gemm_tl(self._codes_of(wname), W.shape[1], w_scale, xq, x_scale)
         if wname in self.hgf:
             A, B, gate = self.hgf[wname]
             corr = (B @ (A @ x.T)).T  # [T, out]

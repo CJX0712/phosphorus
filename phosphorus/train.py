@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import time
 from pathlib import Path
 
@@ -91,8 +92,11 @@ def run_train(
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=tcfg.lr, betas=tcfg.betas, weight_decay=tcfg.weight_decay
     )
-    if tcfg.num_threads:
-        torch.set_num_threads(tcfg.num_threads)
+    # 线程数默认取全部逻辑核：实测 torch 默认只开 8 线程，16 线程下吞吐约 2×
+    # （见 docs/BENCHMARKS.md）。超线程对小 GEMM 的收益在此规模下仍为正。
+    torch.set_num_threads(tcfg.num_threads or (os.cpu_count() or 1))
+    if verbose:
+        print(f"[train] torch threads={torch.get_num_threads()}")
 
     t0 = time.time()
     best_val = float("inf")

@@ -57,6 +57,8 @@ class PhosFile:
         hgf:     name -> (A f16 [r,in], B f16 [out,r], gate float)
         tokenizer: 分词器（若文件带 tokenizer blob）
         header:  解析后的 header 字典（含结构超参与量化配置）
+        raw:     三值张量的**原始 5-bit 打包字节**（供 TL 后端直接查 LUT，
+                 避免「解包成 int8 再算」这条非部署路径掩盖真实成本）
     """
 
     def __init__(
@@ -67,6 +69,7 @@ class PhosFile:
         tokenizer: Tokenizer | None,
         header: dict[str, Any],
         metadata: dict[str, Any] | None = None,
+        raw: dict[str, bytes] | None = None,
     ) -> None:
         self.weights = weights
         self.scales = scales
@@ -74,6 +77,7 @@ class PhosFile:
         self.tokenizer = tokenizer
         self.header = header
         self.metadata = metadata or {}
+        self.raw = raw or {}
 
     def tensor_names(self) -> list[str]:
         return sorted(self.weights)
@@ -125,6 +129,7 @@ def load_phos(path_or_bytes: str | Path | bytes) -> PhosFile:
 
     weights: dict[str, np.ndarray] = {}
     scales: dict[str, np.ndarray] = {}
+    raw: dict[str, bytes] = {}
     hgf: dict[str, Any] = {}
     n_tensor = header["n_tensor"]
     index_off = HEADER_BYTES
@@ -150,6 +155,7 @@ def load_phos(path_or_bytes: str | Path | bytes) -> PhosFile:
             packed = np.frombuffer(blob, dtype=np.uint8, count=data_bytes, offset=data_off)
             N, K = int(shape[0]), int(shape[1])
             weights[name] = unpack_ternary_v1(packed, N, K)
+            raw[name] = bytes(packed)  # 保留打包字节，供 TL 后端查 LUT
         else:
             arr = np.frombuffer(blob, dtype=np.float32, count=n_elem, offset=data_off)
             weights[name] = arr.reshape(shape).copy()
@@ -183,4 +189,4 @@ def load_phos(path_or_bytes: str | Path | bytes) -> PhosFile:
         except Exception:
             metadata = None
 
-    return PhosFile(weights, scales, hgf, tokenizer, header, metadata)
+    return PhosFile(weights, scales, hgf, tokenizer, header, metadata, raw)

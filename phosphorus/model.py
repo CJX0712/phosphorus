@@ -28,8 +28,16 @@ from .config import ModelConfig, QuantConfig
 # --------------------------------------------------------------------------- #
 
 
-def absmean(w: torch.Tensor, group: int = 128) -> torch.Tensor:
-    """BitNet absmean 缩放（per-channel / per-block）。返回 scale [out, ...]。"""
+def absmean(w: torch.Tensor) -> torch.Tensor:
+    """BitNet absmean 缩放（per-channel，按输出行）。返回 scale [out, 1]。
+
+    为什么是 absmean 而不是 absmax（BitNet b1.58 §3.1）：absmean 对离群值鲁棒，
+    且无需校准集。scale = mean(|W|) 后 round(W/scale) 的值域天然落在 [-1,1]。
+
+    注：`.phos` 的 scale 布局按 per-channel 设计（每行一个 float32）；
+    per_tensor / per_block 粒度尚未落地（会改变 .phos 的 scale 张量形状，
+    需要格式版本升级）。故此处不暴露未实现的粒度选项——不做「幽灵参数」。
+    """
     return w.abs().mean(dim=-1, keepdim=True)
 
 
@@ -65,13 +73,11 @@ class BitLinear(nn.Module):
         hgf_rank: int = 0,
         hgf_alpha: float = 1.0,
         hgf_gate_init: float = 0.05,
-        group: int = 128,
     ) -> None:
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.qat = qat
-        self.group = group
         self.weight = nn.Parameter(torch.zeros(out_features, in_features))
         nn.init.xavier_uniform_(self.weight)
         self.hgf_rank = hgf_rank
@@ -86,7 +92,7 @@ class BitLinear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.qat:
             with torch.no_grad():
-                s = absmean(self.weight, self.group)
+                s = absmean(self.weight)
             w = ternary_ste(self.weight, s)
         else:
             w = self.weight
@@ -279,20 +285,24 @@ class LlamaModel(nn.Module):
                 "down_proj",
             ):
                 blk: BitLinear = getattr(ly, proj)
-                w = blk.weight.detach().cpu().numpy().astype(np.float32)
-                if blk.qat:
-                    s = (
-                        absmean(blk.weight, blk.group)
-                        .reshape(-1)
-                        .detach()
-                        .cpu()
-                        .numpy()
-                        .astype(np.float32)
+                if not blk.qat:
+                    # fp32 检查点无法导出：.phos 的张量 dtype 是 TERNARY_PACKED，
+                    # 把 fp32 权重 astype(int8) 会静默截断（丢掉全部小数位），
+                    # 属于「看起来成功、实则毁掉模型」的陷阱，故显式报错。
+                    raise ValueError(
+                        f"layers.{i}.{proj} 未走 QAT（qat=False），无法导出 .phos；"
+                        "引擎只支持三值权重。请改用 --mode qat-hgf 训练。"
                     )
-                    ternary = np.clip(np.round(w / s.reshape(-1, 1)), -1, 1).astype(np.int8)
-                else:
-                    s = np.ones(w.shape[0], dtype=np.float32)
-                    ternary = w.astype(np.int8)
+                w = blk.weight.detach().cpu().numpy().astype(np.float32)
+                s = (
+                    absmean(blk.weight)
+                    .reshape(-1)
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32)
+                )
+                ternary = np.clip(np.round(w / s.reshape(-1, 1)), -1, 1).astype(np.int8)
                 out[f"layers.{i}.{proj}.weight"] = ternary
                 out[f"layers.{i}.{proj}.scale"] = s
                 if blk.hgf_rank > 0:

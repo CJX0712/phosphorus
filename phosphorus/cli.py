@@ -28,6 +28,18 @@ def build_config_from_args(a: argparse.Namespace) -> PhosphorusConfig:
         cfg.train.steps = a.steps
     if getattr(a, "mode", None):
         cfg.train.mode = TrainConfig.mode.__class__(a.mode)  # TrainMode 枚举
+    if getattr(a, "hgf_rank", None) is not None:
+        cfg.quant.hgf_rank = a.hgf_rank
+    if getattr(a, "block_size", None):
+        cfg.train.block_size = a.block_size
+    if getattr(a, "batch_size", None):
+        cfg.train.batch_size = a.batch_size
+    if getattr(a, "lr", None):
+        cfg.train.lr = a.lr
+    if getattr(a, "seed", None) is not None:
+        cfg.train.seed = a.seed
+    if getattr(a, "num_threads", None):
+        cfg.train.num_threads = a.num_threads
     if getattr(a, "max_new_tokens", None):
         cfg.decode.max_new_tokens = a.max_new_tokens
     if getattr(a, "temperature", None):
@@ -54,27 +66,35 @@ def cmd_train(a: argparse.Namespace) -> None:
     import torch
 
     torch.save({"model": model.state_dict(), "stats": stats}, out.with_suffix(".pt"))
-    if cfg.quant.scheme.value == "ternary":
+    qat = cfg.train.mode.value == "qat-hgf"
+    if cfg.quant.scheme.value == "ternary" and qat:
         export_trained(model, tok, cfg, out.with_suffix(".phos"))
         print(f"[ok] checkpoint -> {out.with_suffix('.pt')}")
         print(f"[ok] model     -> {out.with_suffix('.phos')}")
     else:
-        print(f"[ok] checkpoint -> {out.with_suffix('.pt')}（非 ternary，不导出 .phos）")
+        print(
+            f"[ok] checkpoint -> {out.with_suffix('.pt')}"
+            "（fp32 基线不导出 .phos：引擎只接受三值权重）"
+        )
 
 
 def cmd_export(a: argparse.Namespace) -> None:
-    """从 .pt 检查点导出 .phos。"""
+    """从 .pt 检查点导出 .phos（`quantize` 与 `export` 共用同一实现）。"""
     import torch
 
-    from .export import export_model
+    from .export import export_model, inspect_phos
     from .model import LlamaModel
     from .tokenizer import Tokenizer
 
+    if getattr(a, "inspect", False):
+        print(inspect_phos(a.checkpoint))
+        return
+
     cfg = build_config_from_args(a)
-    ckpt = torch.load(a.checkpoint, map_location="cpu")
+    ckpt = torch.load(a.checkpoint, map_location="cpu", weights_only=False)
     model = LlamaModel(cfg.model, cfg.quant)
     model.load_state_dict(ckpt["model"])
-    tok = Tokenizer.load(a.tokenizer) if a.tokenizer else None
+    tok = Tokenizer.load(a.tokenizer) if getattr(a, "tokenizer", None) else None
     weights = model.export_numpy()
     blob = export_model(weights, cfg.model, cfg.quant, tokenizer=tok, path=a.out)
     print(f"[ok] exported .phos ({len(blob):,} bytes) -> {a.out}")
@@ -84,7 +104,7 @@ def cmd_generate(a: argparse.Namespace) -> None:
     from .engine import PhosModel
 
     cfg = build_config_from_args(a)
-    model = PhosModel.from_file(a.model)
+    model = PhosModel.from_file(a.model, backend=getattr(a, "backend", "fp32"))
     t0 = time.time()
     text = model.generate(
         a.prompt,
@@ -93,8 +113,10 @@ def cmd_generate(a: argparse.Namespace) -> None:
         top_k=cfg.decode.top_k,
         top_p=cfg.decode.top_p,
         seed=cfg.decode.seed,
+        stream=getattr(a, "stream", False),
     )
-    print(text)
+    if not getattr(a, "stream", False):
+        print(text)
     if a.bench:
         print(f"\n[bench] 生成 {cfg.decode.max_new_tokens} token 用时 {time.time() - t0:.2f}s")
 
@@ -104,11 +126,11 @@ def cmd_bench(a: argparse.Namespace) -> None:
 
     from .engine import PhosModel
 
-    model = PhosModel.from_file(a.model)
+    model = PhosModel.from_file(a.model, backend=getattr(a, "backend", "fp32"))
     n = a.tokens
     # 特殊 token（如 <|bos|>）id 可能 >= vocab，嵌入表无对应行；回退到 id 0 做吞吐基准。
     start = model.bos_id if (model.bos_id is not None and 0 <= model.bos_id < model.vocab) else 0
-    prompt_ids = [start] * min(8, model.max_seq_len)
+    prompt_ids = [start] * min(a.prompt_len, model.max_seq_len)
     model.reset()
     t0 = time.time()
     logits = model.forward(np.array(prompt_ids, dtype=np.int64))
@@ -166,31 +188,55 @@ def build_parser() -> argparse.ArgumentParser:
     pt.add_argument("--mode", default=None, choices=["fp32", "qat-hgf"])
     pt.add_argument("--vocab", type=int, default=None)
     pt.add_argument("--scale", default=None, choices=["tiny", "small", "base"])
+    pt.add_argument("--batch-size", type=int, default=None)
+    pt.add_argument("--block-size", type=int, default=None)
+    pt.add_argument("--lr", type=float, default=None)
+    pt.add_argument("--hgf-rank", type=int, default=None)
+    pt.add_argument("--seed", type=int, default=None)
+    pt.add_argument("--num-threads", type=int, default=None)
     pt.set_defaults(func=cmd_train)
 
     pe = sub.add_parser("export", help="从 .pt 检查点导出 .phos")
-    pe.add_argument("--checkpoint", required=True)
+    pe.add_argument("--checkpoint", "--in", dest="checkpoint", required=True)
     pe.add_argument("--config", default=None)
     pe.add_argument("--tokenizer", default=None)
     pe.add_argument("--out", required=True)
     pe.add_argument("--scale", default=None, choices=["tiny", "small", "base"])
     pe.add_argument("--vocab", type=int, default=None)
+    pe.add_argument("--inspect", action="store_true", help="只打印 .phos 结构与张量索引")
     pe.set_defaults(func=cmd_export)
+
+    # quantize 与 export 同实现：quantize 是面向「训练完直接量化」的语义别名，
+    # 额外支持 --inspect（调试 .phos 的主要入口）。
+    pq = sub.add_parser("quantize", help="量化导出 .phos（export 的别名，支持 --inspect）")
+    pq.add_argument("--checkpoint", "--in", dest="checkpoint", required=True)
+    pq.add_argument("--config", default=None)
+    pq.add_argument("--tokenizer", default=None)
+    pq.add_argument("--out", default=None)
+    pq.add_argument("--scale", default=None, choices=["tiny", "small", "base"])
+    pq.add_argument("--vocab", type=int, default=None)
+    pq.add_argument("--hgf-rank", type=int, default=None)
+    pq.add_argument("--inspect", action="store_true")
+    pq.set_defaults(func=cmd_export)
 
     pg = sub.add_parser("generate", help="用 .phos 生成文本")
     pg.add_argument("--model", required=True)
     pg.add_argument("--prompt", default="")
     pg.add_argument("--config", default=None)
+    pg.add_argument("--backend", default="fp32", choices=["fp32", "int8", "tl", "i2s"])
     pg.add_argument("--max_new_tokens", type=int, default=None)
     pg.add_argument("--temperature", type=float, default=None)
     pg.add_argument("--top_k", type=int, default=None)
     pg.add_argument("--top_p", type=float, default=None)
+    pg.add_argument("--stream", action="store_true")
     pg.add_argument("--bench", action="store_true")
     pg.set_defaults(func=cmd_generate)
 
     pb = sub.add_parser("bench", help="推理吞吐基准")
     pb.add_argument("--model", required=True)
     pb.add_argument("--tokens", type=int, default=64)
+    pb.add_argument("--prompt-len", type=int, default=8)
+    pb.add_argument("--backend", default="fp32", choices=["fp32", "int8", "tl", "i2s"])
     pb.set_defaults(func=cmd_bench)
 
     pk = sub.add_parser("tokenize", help="分词器训练 / 编解码")

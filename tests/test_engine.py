@@ -1,7 +1,7 @@
 """不变量 ⑦：engine（纯 numpy）与 torch 参考模型 logits 相对误差 < 5%。
 
-默认走忠实路径（quant_act=False，激活 fp32、权重三值），与 torch QAT
-前向逐元素等价。int8 激活路径是部署态近似（量化误差来源），仅校验有限且
+默认走忠实路径（backend="fp32"，激活 fp32、权重三值），与 torch QAT
+前向逐元素等价。i2s 整数路径是部署态近似（激活量化误差来源），仅校验有限且
 分布相近，不作为 <5% 红线（对应风险 R6）。
 """
 
@@ -67,7 +67,7 @@ def test_engine_vs_torch_logits():
     weights = model.export_numpy()
     blob = export_model(weights, mcfg, qcfg, path="ckpt/_t_engine.phos")
     pf = load_phos(blob)
-    eng = PhosModel(pf, quant_act=False)
+    eng = PhosModel(pf, backend="fp32")
     elogits = eng.forward(ids)
 
     rel = np.abs(elogits - tlogits).sum() / (np.abs(tlogits).sum() + 1e-9)
@@ -88,8 +88,8 @@ def test_engine_int8_path_finite_and_close():
     weights = model.export_numpy()
     blob = export_model(weights, mcfg, qcfg, path="ckpt/_t_engine_i8.phos")
     pf = load_phos(blob)
-    eng_fp = PhosModel(pf, quant_act=False)
-    eng_i8 = PhosModel(pf, quant_act=True)
+    eng_fp = PhosModel(pf, backend="fp32")
+    eng_i8 = PhosModel(pf, backend="i2s")
     lf = eng_fp.forward(ids)
     li = eng_i8.forward(ids)
     assert np.all(np.isfinite(li))
@@ -112,7 +112,7 @@ def test_engine_generate_runs():
     tok = Tokenizer.train("hello world abc def", vocab_size=200)
     blob = export_model(weights, mcfg, qcfg, tokenizer=tok, path="ckpt/_t_gen.phos")
     pf = load_phos(blob)
-    eng = PhosModel(pf, quant_act=False)
+    eng = PhosModel(pf, backend="fp32")
     out = eng.generate("abc", max_new_tokens=4, temperature=0.0, seed=0)
     assert isinstance(out, str)
 
@@ -132,6 +132,6 @@ def test_engine_generate_empty_prompt_falls_back_when_bos_out_of_vocab():
     assert tok.specials.get("<|bos|>", -1) >= mcfg.vocab_size, "需复现 special id 越界"
     blob = export_model(weights, mcfg, qcfg, tokenizer=tok, path="ckpt/_t_spec.phos")
     pf = load_phos(blob)
-    eng = PhosModel(pf, quant_act=False)
+    eng = PhosModel(pf, backend="fp32")
     out = eng.generate("", max_new_tokens=2, temperature=0.0, seed=0)
     assert isinstance(out, str)
