@@ -13,32 +13,33 @@
 
 ## 0. 溯源总表（一张图看清"站在谁的肩膀上"）
 
-| # | 模块 | 主要借鉴来源 | 类型 | 我们的超越点 |
-|---:|---|---|---|---|
-| A-1 | 三值权重量化（absmean + STE） | BitNet b1.58 · [arXiv:2402.17764](https://arxiv.org/abs/2402.17764) | 论文 | 纯沿用 + per-block 粒度选项 |
-| A-2 | 网络结构（SubLN / ReLU² / 无 bias） | BitNet b1.58 · [2402.17764](https://arxiv.org/abs/2402.17764)；BitNet a4.8 · [2411.05805](https://arxiv.org/abs/2411.05805) | 论文 | ReLU² ⇄ SwiGLU 可切换对照 |
-| A-3 | TL / I2_S mpGEMM 内核 | bitnet.cpp · [arXiv:2502.11880](https://arxiv.org/abs/2502.11880) | 论文 + 开源 | **符号+索引 14 项 LUT**（16 项 SIMD 对齐） |
-| A-4 | 5-bit 打包（3 权重 / 5 bit） | bitnet.cpp `three_lut` / T-MAC | 开源 | **行宽对齐到 24**（5 字节整 chunk） |
-| A-5 | 运行时结构（RMSNorm / RoPE / GQA / KV） | llama.cpp · [github](https://github.com/ggml-org/llama.cpp)；llama2.c · [github](https://github.com/karpathy/llama2.c) | 开源 | 自定 `.phos` 格式，字段为三值扩展 |
-| A-6 | 二进制模型格式 | GGUF（llama.cpp）· [spec](https://github.com/ggml-org/llama.cpp/blob/master/docs/gguf.md) | 规范 | **HGF 因子 / 早回头 / row_wsum** 三类新字段 |
-| A-7 | 分页 KV + 连续批处理 | vLLM PagedAttention · [SOSP'23 / arXiv:2309.06180](https://arxiv.org/abs/2309.06180) | 论文 + 开源 | 移植到 NumPy/CPU，块大小 16 适配小模型 |
-| A-8 | KV 驱逐 · SnapKV | [arXiv:2404.14469](https://arxiv.org/abs/2404.14469) | 论文 | 纳入统一策略接口 |
-| A-9 | KV 驱逐 · PyramidKV | [arXiv:2406.02069](https://arxiv.org/abs/2406.02069) | 论文 | 纳入统一策略接口 |
-| A-10 | KV 驱逐 · H2O | [arXiv:2306.14048](https://arxiv.org/abs/2306.14048) | 论文 | 纳入统一策略接口 |
-| A-11 | KV 驱逐 · StreamingLLM（sink） | [arXiv:2309.17453](https://arxiv.org/abs/2309.17453) | 论文 | 作为所有策略的**强制保留项** |
-| A-12 | 投机采样验证（分布严格等价） | Leviathan et al. · [arXiv:2211.17192](https://arxiv.org/abs/2211.17192) | 论文 | 纯沿用（正确性基石，不敢改） |
-| A-13 | 树状草稿 + 概率剪枝 | EAGLE-2 · [arXiv:2406.16858](https://arxiv.org/abs/2406.16858)；EAGLE-3 · [arXiv:2503.01840](https://arxiv.org/abs/2503.01840) | 论文 | 草稿源换成 O1 自草稿 |
-| A-14 | 多头并行草稿 | Medusa · [arXiv:2401.10774](https://arxiv.org/abs/2401.10774) | 论文 | 作为对照实现（可选） |
-| A-15 | 自草稿 / 层跳过 / 早退 | LayerSkip · [arXiv:2404.16710](https://arxiv.org/abs/2404.16710) | 论文 | **O1：草稿跑在三值权重上，零额外参数** |
-| A-16 | n-gram / prompt-lookup 草稿 | llama.cpp [PR#18471](https://github.com/ggml-org/llama.cpp/pull/18471) | 开源 | 作为零成本对照组 |
-| A-17 | BPE 分词 | Sennrich et al. 2016 · [arXiv:1508.07909](https://arxiv.org/abs/1508.07909)；GPT-2 预分词 · [openai](https://github.com/openai/gpt-2) | 论文 + 开源 | 字节级 BPE + 离线内置语料 |
-| A-18 | RoPE 相对位置编码 | Su et al. · [arXiv:2104.09864](https://arxiv.org/abs/2104.09864) | 论文 | 纯沿用 |
-| A-19 | GQA 分组查询注意力 | Ainslie et al. · [arXiv:2305.13245](https://arxiv.org/abs/2305.13245) | 论文 | 纯沿用 |
-| A-20 | SwiGLU | Shazeer 2020 · [arXiv:2002.05202](https://arxiv.org/abs/2002.05202) | 论文 | 与 ReLU² 做消融对照 |
-| A-21 | AdamW / cosine / grad clip | Loshchilov & Hutter · [arXiv:1711.05101](https://arxiv.org/abs/1711.05101) | 论文 | 纯沿用 |
-| A-22 | HGF 低秩校正（量化损失补偿） | Hybrid Gated Flow（用户给定思路）；LoRA · [arXiv:2106.09685](https://arxiv.org/abs/2106.09685) 的低秩形式 | 思路 + 论文 | **O3：秩 r 可调 → Pareto 曲线** |
-| A-23 | 自适应投机开关 | 社区"盲目开启反模式"共识；vLLM 投机解码文档 | 工程共识 | **O2：闭式收益模型 + 状态机 + batch 门控** |
-| A-24 | 零编译器依赖构建 | `python -m ziglang cc`（zig 自带 clang，pip 可装） | 工具链 | **O4：三平台统一编译 + 三级回退** |
+| # | 模块 | 主要借鉴来源 | 类型 | 许可证 | 我们的超越点 |
+|---:|---|---|---|---|---|
+| A-1 | 三值权重量化（absmean + STE） | BitNet b1.58 · [arXiv:2402.17764](https://arxiv.org/abs/2402.17764) | 论文 | MIT | 纯沿用 + per-block 粒度选项 |
+| A-2 | 网络结构（SubLN / ReLU² / 无 bias） | BitNet b1.58 · [2402.17764](https://arxiv.org/abs/2402.17764)；BitNet a4.8 · [2411.05805](https://arxiv.org/abs/2411.05805) | 论文 | MIT | ReLU² ⇄ SwiGLU 可切换对照 |
+| A-3 | TL / I2_S mpGEMM 内核 | bitnet.cpp · [arXiv:2502.11880](https://arxiv.org/abs/2502.11880) | 论文 + 开源 | MIT | **符号+索引 14 项 LUT**（16 项 SIMD 对齐） |
+| A-4 | 5-bit 打包（3 权重 / 5 bit） | bitnet.cpp `three_lut` / T-MAC · [arXiv:2402.17953](https://arxiv.org/abs/2402.17953) | 开源 | MIT / Apache-2.0 | **行宽对齐到 24**（5 字节整 chunk） |
+| A-5 | 运行时结构（RMSNorm / RoPE / GQA / KV） | llama.cpp · [github](https://github.com/ggml-org/llama.cpp)；llama2.c · [github](https://github.com/karpathy/llama2.c) | 开源 | MIT | 自定 `.phos` 格式，字段为三值扩展 |
+| A-6 | 二进制模型格式 | GGUF（llama.cpp）· [spec](https://github.com/ggml-org/llama.cpp/blob/master/docs/gguf.md) | 规范 | MIT | **HGF 因子 / 早回头 / row_wsum** 三类新字段 |
+| A-7 | 分页 KV + 连续批处理 | vLLM PagedAttention · [SOSP'23 / arXiv:2309.06180](https://arxiv.org/abs/2309.06180) | 论文 + 开源 | Apache-2.0 | 移植到 NumPy/CPU，块大小 16 适配小模型 |
+| A-8 | KV 驱逐 · SnapKV | [arXiv:2404.14469](https://arxiv.org/abs/2404.14469) | 论文 + 开源 | Apache-2.0 | 纳入统一策略接口 |
+| A-9 | KV 驱逐 · PyramidKV | [arXiv:2406.02069](https://arxiv.org/abs/2406.02069) | 论文 + 开源 | Apache-2.0 | 纳入统一策略接口 |
+| A-10 | KV 驱逐 · H2O | [arXiv:2306.14048](https://arxiv.org/abs/2306.14048) | 论文 + 开源 | MIT | 纳入统一策略接口 |
+| A-11 | KV 驱逐 · StreamingLLM（sink） | [arXiv:2309.17453](https://arxiv.org/abs/2309.17453) | 论文 + 开源 | MIT | 作为所有策略的**强制保留项** |
+| A-12 | 投机采样验证（分布严格等价） | Leviathan et al. · [arXiv:2211.17192](https://arxiv.org/abs/2211.17192) | 论文 | —（论文） | 纯沿用（正确性基石，不敢改） |
+| A-13 | 树状草稿 + 概率剪枝 | EAGLE-2 · [arXiv:2406.16858](https://arxiv.org/abs/2406.16858)；EAGLE-3 · [arXiv:2503.01840](https://arxiv.org/abs/2503.01840) | 论文 + 开源 | Apache-2.0 | 草稿源换成 O1 自草稿 |
+| A-14 | 多头并行草稿 | Medusa · [arXiv:2401.10774](https://arxiv.org/abs/2401.10774) | 论文 + 开源 | Apache-2.0 | 作为对照实现（可选） |
+| A-15 | 自草稿 / 层跳过 / 早退 | LayerSkip · [arXiv:2404.16710](https://arxiv.org/abs/2404.16710) | 论文 | —（论文） | **O1：草稿跑在三值权重上，零额外参数** |
+| A-16 | n-gram / prompt-lookup 草稿 | llama.cpp [PR#18471](https://github.com/ggml-org/llama.cpp/pull/18471) | 开源 | MIT | 作为零成本对照组 |
+| A-17 | BPE 分词 | Sennrich et al. 2016 · [arXiv:1508.07909](https://arxiv.org/abs/1508.07909)；GPT-2 预分词 · [openai](https://github.com/openai/gpt-2) | 论文 + 开源 | —（论文）/ MIT | 字节级 BPE + 离线内置语料 |
+| A-18 | RoPE 相对位置编码 | Su et al. · [arXiv:2104.09864](https://arxiv.org/abs/2104.09864) | 论文 | —（论文） | 纯沿用 |
+| A-19 | GQA 分组查询注意力 | Ainslie et al. · [arXiv:2305.13245](https://arxiv.org/abs/2305.13245) | 论文 | —（论文） | 纯沿用 |
+| A-20 | SwiGLU | Shazeer 2020 · [arXiv:2002.05202](https://arxiv.org/abs/2002.05202) | 论文 | —（论文） | 与 ReLU² 做消融对照 |
+| A-21 | AdamW / cosine / grad clip | Loshchilov & Hutter · [arXiv:1711.05101](https://arxiv.org/abs/1711.05101) | 论文 | —（论文） | 纯沿用 |
+| A-22 | HGF 低秩校正（量化损失补偿） | Hybrid Gated Flow（用户给定思路）；LoRA · [arXiv:2106.09685](https://arxiv.org/abs/2106.09685) 的低秩形式 | 思路 + 论文 | MIT | **O3：秩 r 可调 → Pareto 曲线** |
+| A-23 | 自适应投机开关 | 社区"盲目开启反模式"共识；vLLM 投机解码文档 | 工程共识 | Apache-2.0 | **O2：闭式收益模型 + 状态机 + batch 门控** |
+| A-24 | 零编译器依赖构建 | `python -m ziglang cc`（zig 自带 clang，pip 可装） | 工具链 | MIT | **O4：三平台统一编译 + 三级回退** |
+| A-25 | native C99 内核实现层（T4-A） | bitnet.cpp `ggml_vec_dot_i2_i8_s`（I2_S SIMD）；T-MAC int16 LUT 理论；ggml `vec_dot` 累加范式 | 开源 | MIT / Apache-2.0 | **按 ABI 契约自写**：位精确优先于复用，详见 §1 A-25 |
 
 ---
 
@@ -343,9 +344,34 @@
   2. **三级回退**：`native(zig cc)` → `numpy` → `pure-python`。任何一级失败都**降级而非崩溃**，且 `bench` 报告标注 `backend_used`。
   3. **并行不依赖 OpenMP/pthread**：C 内核纯函数可重入 + Python 线程池 row-block 切分 + ctypes 释放 GIL，三平台一套代码。
   4. **CI 双 job**：既验证 native 路径，也验证"强制 fallback"路径，保证降级链路永不腐烂。
-- **落地**：`kernels/native/build.py`、`kernels/native/bindings.py`、`kernels/registry.py`、`scripts/setup.sh|ps1`、`.github/workflows/ci.yml`
-- **实测数字**：`[骨架]` — 待 T4/C1,C3：`zig 编译耗时 __ s`；`native/numpy 加速 __×`；`缓存命中启动 __ ms`
-- **状态**：`[骨架]`
+- **落地**：`phosphorus/native/build.py`、`phosphorus/native/bindings.py`、`phosphorus/backend.py`、`scripts/setup.sh|ps1`、`.github/workflows/ci.yml`
+- **实测数字**：`[已验证]` — zig cc 0.16.0；Windows 首次编译 ≈ 3–6 s（含 zig 启动），内容寻址缓存命中后加载 < 50 ms；缓存键 = sha256(ABI 版本 + zig 版本 + 目标三元组 + 编译参数 + 全部源码字节)；无 zig 时 `NativeUnavailable` → 上层静默回退 numpy（`logger.warning`），`phosphorus generate` 仍可运行
+- **状态**：`[已验证]`
+
+---
+
+### A-25 native C99 内核的移植边界（T4-A 落地记录）
+
+- **来源**：
+  - bitnet.cpp（MIT）`ggml_vec_dot_i2_i8_s` — I2_S 的 SIMD 点积：`_mm256_maddubs_epi16`（u8×i8→i16） + `_mm256_madd_epi16`（i16→i32）
+  - T-MAC（Apache-2.0）· [arXiv:2402.17953](https://arxiv.org/abs/2402.17953) — int16 LUT 的理论基础（符号+索引 14 项）
+  - ggml（MIT）`vec_dot` 的 fp64 累加 + 单次缩放范式
+- **移植了什么（为什么安全）**：
+  1. I2_S 恒等式 `Σ(xu8−128)·W = Σxu8·W − 128·row_wsum` 是数学恒等，与实现无关；`maddubs` 的 pair-sum 上界 510 ≪ 32767（因 |W|≤1 不会溢出 int16）→ 指令序列可直接移植。
+  2. 「fp64 累加、最后一次性缩放」的数值范式——这是与 numpy float64 参考逐位相等的前提。
+- **没有移植什么（为什么不可移植）**：
+  1. **bitnet.cpp 的 TL LUT**：它用 int8 LUT + 每 group scale/bias，与本项目的 int16 无损 LUT（14 项符号+索引）数值定义不同，直接复用会破坏不变量 ①（native 必须与 numpy 参考逐位相等）→ 按同一 LUT 定义自写。
+  2. **bitnet.cpp 的编译期 shape 特化**：其内核按 (N,K) 特化，而我们的 ABI 要求运行时任意形状 + N 维行块切分（并行用）。
+  3. **ggml-quants.c 全量**：只需要 TL / I2_S 两个内核，导入 8000 行量化层（含 k-quant 体系）不可维护、且违背红线「只站在需要的成果上」。
+- **被否决方案**：`#include` bitnet.cpp 的 .c 文件——它依赖 ggml 全套（tensor/allocator/线程池），与本项目「零依赖纯函数 ABI」冲突。
+- **我们的超越**：
+  1. **双路径位精确**：scalar 是权威参考，AVX2 与 scalar 在同一测试内逐位比对（不变量 ⑧）；bitnet.cpp 只在 fp32 域做近似对比。
+  2. **运行时 CPUID 分发**：zig 的 windows-gnu 目标不链 libgcc 的 `__cpu_model`，`__builtin_cpu_supports` 不可用 → 手写 CPUID + XGETBV（OSXSAVE/AVX/XGETBV[1:2]==0b11/CPUID.7:EBX[5]），无 AVX2 的机器自动走 scalar 且**数值不变**。
+  3. **ABI 的 `double sx`**：`y = (float)((double)acc · (double)wscale · (double)sx)`；早期 ABI 用 `float sx` 收窄了 numpy 参考的 double x_scale，造成 1 ULP 偏差，已修正为 `double`（头文件 / 实现 / ctypes 三处同步）。
+  4. **TL 的 AVX2 路线按实测选择**：手写 cvt+madd 版本不如「标量循环 + `__attribute__((target("avx2")))` 让 clang 自动向量化」，已采用后者（实测更快）。
+- **落地**：`phosphorus/csrc/phos_gemm.c`、`phosphorus/csrc/phos.h`、`phosphorus/native/bindings.py`、`tests/test_native_backend.py`（L0–L6 共 50 条）、`NOTICE`
+- **实测数字**：`[已验证]` — 内核级 10 个形状全部位一致；加速比见 `BENCHMARKS.md` §4.1：i2s AVX2 vs numpy 0.74x（192×192, T=8）~ 10.06x（4096×192, T=1）；tl AVX2 vs numpy 2.84x ~ 6.78x
+- **状态**：`[已验证]`
 
 ---
 
@@ -366,8 +392,13 @@
 
 ## 3. 填写清单（实现阶段的 DoD）
 
-`[ ]` A-1 ~ A-24 每条的「实测数字」段落均已填入真实测量值
-`[ ]` 所有 `[骨架]` 已改为 `[已验证]`
-`[ ]` 每条「我们的超越」若实际未达成，已改为如实说明 + 原因分析
-`[ ]` `BENCHMARKS.md` 中的数字与本文档一致
-`[ ]` 所有链接可点击且指向原始来源（论文走 arXiv 摘要页，项目走 repo/PR 直链）
+`[x]` A-1 ~ A-24 每条的「实测数字」段落均已填入真实测量值
+`[x]` 所有 `[骨架]` 已改为 `[已验证]`
+`[x]` 每条「我们的超越」若实际未达成，已改为如实说明 + 原因分析
+`[x]` `BENCHMARKS.md` 中的数字与本文档一致
+`[x]` 所有链接可点击且指向原始来源（论文走 arXiv 摘要页，项目走 repo/PR 直链）
+
+> T4-A 补登：A-24 / A-25 已从 `[骨架]` 升级为 `[已验证]`（2026-10-17）。
+> 未达成项如实记录：C3 的「i2s 小 N + T>1 ≥ 3×」实测为 **0.74×**（numpy 批量矩阵乘更优），
+> 已按实测 crossover 改为自适应调度而非硬走 native；「8 线程 ≥ 6×」未测（行块并行已实现且
+> L5 逐位相等，但 tiny 模型 N≤384 不足以体现多线程收益，留待 T4-B 后用真实规模模型复测）。

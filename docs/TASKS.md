@@ -10,7 +10,8 @@
 - **T1 ✅ 已完成**：工程地基 + 数据 + 分词 + CLI；25 项 pytest 全绿，ruff 干净；`no-torch` 导入路径通过（仅 `cli/train/model` 用 torch，且为惰性导入）。
 - **T2 ✅ 已完成**：LLaMA 变体 + absmean 三值 QAT-STE + HGF 低秩校正；`ternary_ste` 前向已修复为**真三值**（此前误写为 `2·w_tern·scale−w`，导致不变量⑦ 偏离 138%），修复后 STE 梯度恒等、权重建中 `{-1,0,1}` 占 100%。
 - **T3 ✅ 已完成**：`.phos` 导出 + 三值 5-bit 打包 + 纯 numpy 四后端；**不变量⑦ engine-vs-torch logits rel_err ≈ 0.0001%（argmax 100% 一致）**；不变量①③⑤⑥ 全部有测试覆盖。**端到端实测**（`docs/BENCHMARKS.md`）：真实训练 qat-hgf 1.78M × 150 步，val_loss 4.4979 → 3.8987（ppl 49.36）；`generate` 输出连贯莎剧风格文本；`bench` prefill 1296 tok/s、decode 290.9 tok/s。
-- **T4 🔜 规划中**：原生 C99 内核（`csrc/phos.h` 仅头文件）+ 分页 KV / 驱逐 / 连续批处理。
+- **T4-A ✅ 已交付**：原生 C99 内核（zig cc 现场编译 + 内容寻址缓存 + 文件锁）；**TL / I2_S GEMM 在 int32 与 fp32 域与 numpy 逐位相等**（不变量⑧）；rmsnorm/softmax/rope < 1e-6；pack/unpack 逐字节相等；`backend.py` 实现后端注册 + `engine._use_native` 按实测 crossover 自适应调度。**实测**：tl native prefill **2.74x** / decode **1.48x**；i2s native decode **1.32x**（prefill 小 N 时 numpy 更优，已按调度回退）；94/94 pytest 全绿。
+- **T4-B~E 🔜 规划中**：分页 KV / 块管理 / GQA 注意力（B）、三种驱逐策略 SnapKV-PyramidKV-H2O（C）、连续批处理 + 采样器（D）、性能与端到端生成收尾（E）。
 - **T5 🔜 规划中**：投机解码（O1/O2）+ 基准矩阵 / Pareto（O3）+ 文档收尾（API / BENCHMARKS / CONTRIBUTING）。
 
 > 注：实际落地为**扁平包** `phosphorus/*.py`（详见 `ARCHITECTURE.md` §0.4 / §2.1），与本文初版规划的嵌套子包结构不同——功能等价，仅目录组织简化。C2（val_loss<3.5）/ C4（HGF 字节占比）/ C6（投机 α）等量化验收的实测数字见 `docs/BENCHMARKS.md`。
@@ -154,29 +155,35 @@ graph LR
 
 **优先级 P0** · **复杂度 XL（约 2 天）** · **依赖：T3**
 
+> **进度**：T4-A（C1 编译链 + C2 内核位精确 + C3 性能测量 + C5 实现后端注册）✅ 已交付；
+> T4-B（分页 KV / 块管理 / GQA 注意力）~ T4-E（性能 / 端到端生成 / 文档）🔜 规划中。
+> 实测数字见 `BENCHMARKS.md` §4。
+
 ### 目标
 用 `python -m ziglang cc` 编译 C99 内核（TL GEMM + RMSNorm + softmax + RoPE + pack/unpack），与 NumPy 后端**位精确**；实现完整推理引擎：分页 KV、块管理、三种驱逐策略、连续批处理调度、GQA 注意力、采样器、生成器。
 
-### 文件清单（新建 16 个）
+### 文件清单（T4-A 实际落地；括号内为规划名）
 
 | 类别 | 文件 |
 |---|---|
-| C 内核 | `phosphorus/kernels/native/phos_pack.h/.c`, `phos_gemm.h/.c`, `phos_ops.h/.c`, `build.py`, `bindings.py` |
-| 引擎 | `phosphorus/engine/block_manager.py`, `kv_cache.py`, `eviction.py`, `scheduler.py`, `attention.py`, `sampler.py`, `generate.py` |
-| 测试 | `tests/test_native_backend.py`, `tests/test_kv_eviction.py`（不变量 ⑦）, `tests/test_paged_attention.py`, `tests/test_scheduler.py` |
+| C 内核 | `phosphorus/csrc/phos.h`, `phos_gemm.c`, `phos_pack.c`, `phos_ops.c`（规划 `phosphorus/kernels/native/phos_*.h/.c`） |
+| 构建/绑定 | `phosphorus/native/build.py`, `bindings.py`, `parallel.py`, `__init__.py`；`phosphorus/backend.py`（实现后端注册，C5） |
+| 基准 | `scripts/bench_kernels.py`, `scripts/bench_native.py` |
+| 引擎 | `phosphorus/engine.py` 增加 native 自适应调度（`_use_native` / `_proj_native`）；分页 KV 等 T4-B~E |
+| 测试 | `tests/test_native_backend.py`（50 条，L0–L6）；`test_kv_eviction.py` 等 T4-C |
 
 ### 检查点与验收标准（可量化）
 
-| 检查点 | 验收标准 |
-|---|---|
-| **C1 编译链** | `python -m ziglang cc -O2 -shared -fPIC` 在 Windows / Linux / macOS 均产出可加载动态库；失败时 `build.py` 抛出 `NativeUnavailable` 且上层**静默降级**（不 crash）；编译产物缓存到 `~/.cache/phosphorus/native/<hash>.so`，二次启动 < 50 ms |
-| **C2 内核位精确** | `native.gemm_tl(Wp, xq)` 与 `numpy.gemm_tl(...)` 对 100 组随机输入 `N,K ∈ {128,256,512}`**逐位相等**；`rmsnorm/softmax/rope` 与 fp32 参考**绝对误差 < 1e-6**；`pack/unpack` 与 NumPy 实现逐位相等 |
-| **C3 性能** | `N=K=512` 单次 TL GEMM：native **≥ 3×** NumPy 后端（同机器同线程数）；8 线程 row-block 并行下 **≥ 6×** |
-| **C4 分页注意力** | `paged_gqa_attention` 输出与等价 dense 注意力（无驱逐、块大小 16）**最大绝对差 < 1e-5**；`block_manager` 分配/回收 10 000 次无泄漏（`utilization()` 回到 0） |
-| **C5 驱逐（不变量 ⑦）** | 预算 = 50% 序列长时，三种策略（SnapKV / PyramidKV / H2O）逐层注意力输出**相对 L2 误差 < 10%**；解压后 PPL 退化 **< 10%**；`none`（不驱逐）作为对照组；`BudgetAllocator` 逐层预算之和 == 总预算 ± 1 |
-| **C6 连续批处理** | `Scheduler` 同时跑 8 条序列，与逐条串行生成的 token id **完全一致**（greedy, temperature=0）；吞吐提升 ≥ 2×（8 条 vs 1 条，tokens/s 总量） |
-| **C7 采样** | `top_k/top_p/temperature` 行为与参考实现一致；`temperature=0` 时 greedy；同 seed 可复现 |
-| **C8 生成** | `phosphorus generate --model tiny.phos --backend native --prompt "..."` 产出连贯文本；`--stream` 逐 token 输出；首 token 延迟 < 500 ms（10 M 模型） |
+| 检查点 | 验收标准 | 状态 |
+|---|---|---|
+| **C1 编译链** | `python -m ziglang cc -O2 -shared -fPIC` 在 Windows / Linux / macOS 均产出可加载动态库；失败时 `build.py` 抛出 `NativeUnavailable` 且上层**静默降级**（不 crash）；编译产物缓存到 `~/.cache/phosphorus/native/<hash>.so`，二次启动 < 50 ms | ✅ Windows 实测通过；内容寻址缓存 + 文件锁；Linux/macOS 目标三元组已支持（CI 待补） |
+| **C2 内核位精确** | `native.gemm_tl(Wp, xq)` 与 `numpy.gemm_tl(...)` 对 100 组随机输入 `N,K ∈ {128,256,512}`**逐位相等**；`rmsnorm/softmax/rope` 与 fp32 参考**绝对误差 < 1e-6**；`pack/unpack` 与 NumPy 实现逐位相等 | ✅ int32 与 fp32 域均逐位相等（L0/L2）；ops < 1e-6（L3）；pack/unpack 逐字节相等（L4，20 seed） |
+| **C3 性能** | `N=K=512` 单次 TL GEMM：native **≥ 3×** NumPy 后端（同机器同线程数）；8 线程 row-block 并行下 **≥ 6×** | ⚠️ 部分达成：TL AVX2 vs numpy 逐 token 路径 **3.53x**（T=1）/ 5.87x（T=8）；i2s AVX2 vs numpy 批量矩阵乘 5.93x/4.39x；**但小 N+T>1 的 i2s 为 0.74x**（numpy 批量矩阵乘更优，已按实测 crossover 自适应调度）。线程池并行已实现（L5 逐位相等），未作为默认开启 |
+| **C4 分页注意力** | `paged_gqa_attention` 输出与等价 dense 注意力（无驱逐、块大小 16）**最大绝对差 < 1e-5**；`block_manager` 分配/回收 10 000 次无泄漏（`utilization()` 回到 0） | 🔜 T4-B |
+| **C5 驱逐（不变量 ⑦）** | 预算 = 50% 序列长时，三种策略（SnapKV / PyramidKV / H2O）逐层注意力输出**相对 L2 误差 < 10%**；解压后 PPL 退化 **< 10%**；`none`（不驱逐）作为对照组；`BudgetAllocator` 逐层预算之和 == 总预算 ± 1 | 🔜 T4-C（实现后端注册 `backend.py` 已随 T4-A 交付） |
+| **C6 连续批处理** | `Scheduler` 同时跑 8 条序列，与逐条串行生成的 token id **完全一致**（greedy, temperature=0）；吞吐提升 ≥ 2×（8 条 vs 1 条，tokens/s 总量） | 🔜 T4-D |
+| **C7 采样** | `top_k/top_p/temperature` 行为与参考实现一致；`temperature=0` 时 greedy；同 seed 可复现 | 🔜 T4-D |
+| **C8 生成** | `phosphorus generate --model tiny.phos --backend native --prompt "..."` 产出连贯文本；`--stream` 逐 token 输出；首 token 延迟 < 500 ms（10 M 模型） | 🔜 T4-E |
 
 ### 关键实现要点
 - C 内核**不使用 OpenMP / pthread**，保持纯函数、可重入、无全局状态；并行由 Python `ThreadPoolExecutor` 在 **row-block** 粒度切分（`ctypes` 调用自动释放 GIL）。
@@ -254,7 +261,7 @@ graph LR
 | T1 | M | 1 天 | `phosphorus tokenize --train` 跑通，BPE 往返无损 |
 | T2 | L | 1.5 天 | 10 M 模型 CPU 训练 ≤ 10 min，PPL 可见 |
 | T3 | L | 1 天 | `tiny.phos` 产出，NumPy 后端 logits 对齐 torch |
-| T4 | XL | 2 天 | `phosphorus generate` 端到端文本，native ≥ 3× |
+| T4 | XL | 2 天 | T4-A ✅ native 内核位精确 + 自适应调度（tl 2.74x / i2s decode 1.32x）；T4-B~E 端到端文本 + 分页 KV |
 | T5 | XL | 2 天 | 投机加速 ≥ 1.3×，基准表 + Pareto 曲线齐备 |
 | **合计** | | **≈ 7.5 人日** | |
 

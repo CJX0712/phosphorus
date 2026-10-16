@@ -20,6 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 # core 分组：装了就能推理（推理路径不 import torch）
@@ -27,7 +28,7 @@ dependencies = ["numpy>=1.24,<3", "tqdm>=4.66"]
 
 [project.optional-dependencies]
 train = ["torch>=2.2"]
-native = ["ziglang>=0.13"]
+native = ["ziglang>=0.13,<0.17"]
 bench = ["numpy>=1.24", "psutil>=5.9"]
 convert = ["transformers>=4.40", "safetensors>=0.4"]
 dev = ["pytest>=7.4", "pytest-cov>=4.1", "ruff>=0.6"]
@@ -44,6 +45,11 @@ phosphorus = "phosphorus.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["phosphorus*"]
+
+# C99 内核源码随包分发：wheel 只含 phosphorus*，故 csrc/ 必须放在包内，
+# 否则 pip 安装后 `phosphorus.native.build` 找不到源码、再也编译不了。
+[tool.setuptools.package-data]
+phosphorus = ["csrc/*.c", "csrc/*.h"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

@@ -20,14 +20,17 @@
 
 from __future__ import annotations
 
+import logging
 import math
 
 import numpy as np
 
 from .gemm import gemm_int8, tl_acc_i32
 from .loader import PhosFile, load_phos
-from .packing import unpack_code5
+from .packing import k_pad, unpack_code5
 from .sampling import sample as _sample
+
+logger = logging.getLogger(__name__)
 
 # 四种 GEMM 后端（ARCHITECTURE.md §5）。
 #   fp32 —— 反量化后的 fp32 基线，与 torch QAT 前向逐元素等价（不变量 ⑦ 的对照面）
@@ -62,10 +65,14 @@ def _ternary_gemm_i2s(W: np.ndarray, w_scale: np.ndarray, xq: np.ndarray, x_scal
     row_sum = W32.sum(axis=1)
     acc = (W32 @ xu8.T) - (128 * row_sum).reshape(-1, 1)  # [out, T]
     return (
-        acc.astype(np.float64)
-        * np.asarray(w_scale, dtype=np.float64).reshape(-1, 1)
-        * np.asarray(x_scale, dtype=np.float64).reshape(1, -1)
-    ).astype(np.float32).T  # [T, out]
+        (
+            acc.astype(np.float64)
+            * np.asarray(w_scale, dtype=np.float64).reshape(-1, 1)
+            * np.asarray(x_scale, dtype=np.float64).reshape(1, -1)
+        )
+        .astype(np.float32)
+        .T
+    )  # [T, out]
 
 
 def _ternary_gemm_tl(codes: np.ndarray, K: int, w_scale: np.ndarray, xq, x_scale) -> np.ndarray:
@@ -127,7 +134,7 @@ def _apply_rope(q: np.ndarray, cos: np.ndarray, sin: np.ndarray) -> np.ndarray:
 class PhosModel:
     """加载 .phos 并执行推理的纯 numpy 模型。"""
 
-    def __init__(self, phos: PhosFile, backend: str = "fp32") -> None:
+    def __init__(self, phos: PhosFile, backend: str = "fp32", native: str | None = None) -> None:
         """构造推理模型。
 
         backend ∈ {"fp32", "int8", "tl", "i2s"}（见模块顶 `BACKENDS`）。
@@ -186,6 +193,26 @@ class PhosModel:
         self._packed = phos.raw
         self._codes: dict[str, np.ndarray] = {}
 
+        # ---- 实现后端（T4）：native C99 内核 / numpy ---------------------- #
+        # 与数学后端（self.backend）正交：tl/i2s 可由原生内核计算。
+        # 默认 auto：native 可用则启用，不可用静默回落 numpy（不改变默认数值路径）。
+        self._row_wsum: dict[str, np.ndarray] = {}
+        self._packed_arr: dict[str, np.ndarray] = {}
+        self._kern = None
+        self.impl = "numpy"
+        try:
+            from .backend import resolve as _resolve_impl
+
+            self.impl = _resolve_impl(native)
+            if self.impl == "native":
+                from .native import kernels as _kernels
+
+                self._kern = _kernels()
+        except Exception as exc:  # noqa: BLE001 - 原生不可用绝不阻断推理
+            logger.warning("phosphorus: native 实现后端不可用，回退 numpy（%s）", exc)
+            self.impl = "numpy"
+            self._kern = None
+
     def _codes_of(self, wname: str) -> np.ndarray:
         """取某三值权重的 code5 数组 [out, ng]（惰性构建 + 缓存）。"""
         if wname not in self._codes:
@@ -199,13 +226,65 @@ class PhosModel:
 
     # ----------------------------- 工厂 ----------------------------- #
     @classmethod
-    def from_file(cls, path, backend: str = "fp32") -> PhosModel:
-        return cls(load_phos(path), backend=backend)
+    def from_file(cls, path, backend: str = "fp32", native: str | None = None) -> PhosModel:
+        return cls(load_phos(path), backend=backend, native=native)
 
     # ----------------------------- 工具 ----------------------------- #
     def _rmsnorm(self, x: np.ndarray, w: np.ndarray) -> np.ndarray:
         var = np.mean(x.astype(np.float32) ** 2, axis=-1, keepdims=True)
         return (x * (1.0 / np.sqrt(var + self.norm_eps)) * w).astype(np.float32)
+
+    def _row_wsum_of(self, wname: str) -> np.ndarray:
+        """row_wsum[i] = Σ_j W[i,j]（.phos 未序列化，从解包权重现算并缓存）。"""
+        if wname not in self._row_wsum:
+            self._row_wsum[wname] = self.w[wname].astype(np.int32).sum(axis=1)
+        return self._row_wsum[wname]
+
+    def _packed_of(self, wname: str) -> np.ndarray:
+        """5-bit 打包字节的 uint8 视图（TL 原生内核直接消费，零拷贝）。"""
+        if wname not in self._packed_arr:
+            self._packed_arr[wname] = np.frombuffer(self._packed[wname], dtype=np.uint8)
+        return self._packed_arr[wname]
+
+    def _use_native(self, T: int, N: int | None = None) -> bool:
+        """按实测 crossover 决定是否走原生内核（数字见 docs/BENCHMARKS.md §T4-A）。
+
+        * `tl`：numpy 侧 `_ternary_gemm_tl` 是**逐 token Python 循环**，
+          native 在全部实测形状都快 2.8x~6.8x → 总是走 native。
+        * `i2s`：numpy 侧是**批量矩阵乘**，小 N（≤512）且 T>1 时占优
+          （192x192@T=8 仅 0.74x）；但实测 N>=1024 时即使 T=8 原生仍快
+          4.6x~9.4x → decode（T=1）与大 N 的 prefill 走 native。
+        两条路径在 int32 域逐位相等（不变量 ①），故该调度不改变数值结果。
+        """
+        if self._kern is None:
+            return False
+        if self.backend == "tl":
+            return True
+        return T == 1 or (N is not None and N >= 1024)
+
+    def _proj_native(self, x, wname, W, w_scale, xq, x_scale):
+        """原生内核投影：与 numpy 路径在 int32 域逐位相等（不变量 ①）。
+
+        i2s 走预解包 int8（P0 主路径，实测 3x~15x）；tl 走 5-bit 打包流
+        （P1，内存受限场景）。逐 token 调用（GEMV 形态）。
+        """
+        k = self._kern
+        N, K = W.shape
+        T = x.shape[0]
+        out = np.empty((T, N), dtype=np.float32)
+        if self.backend == "i2s":
+            rw = self._row_wsum_of(wname)
+            for t in range(T):
+                xu8 = (xq[t].astype(np.int32) + 128).astype(np.uint8)
+                out[t] = k.i2s_gemm_f32(W, xu8, rw, w_scale, float(x_scale[t]))
+        else:  # tl
+            packed = self._packed_of(wname)
+            Kp = k_pad(K)
+            xpad = np.zeros(Kp, dtype=np.int8)
+            for t in range(T):
+                xpad[:K] = xq[t]
+                out[t] = k.tl_gemm_f32(packed, xpad, w_scale, float(x_scale[t]), N, Kp)
+        return out
 
     def _proj(self, x: np.ndarray, name: str) -> np.ndarray:
         """三值线性投影 + 可选 HGF 校正。x: [T, in] -> [T, out]。
@@ -223,7 +302,9 @@ class PhosModel:
             y = gemm_int8(W.astype(np.float32) * w_scale.reshape(-1, 1), x)
         else:
             xq, x_scale = _quant_per_token(x)
-            if self.backend == "i2s":
+            if self._use_native(x.shape[0], W.shape[0]):
+                y = self._proj_native(x, wname, W, w_scale, xq, x_scale)
+            elif self.backend == "i2s":
                 y = _ternary_gemm_i2s(W, w_scale, xq, x_scale)
             else:  # "tl"：真·LUT，直接吃打包流解出的 code5
                 y = _ternary_gemm_tl(self._codes_of(wname), W.shape[1], w_scale, xq, x_scale)
@@ -344,7 +425,11 @@ class PhosModel:
         if not ctx:
             # 特殊 token（如 <|bos|>）的 id 可能 >= vocab（词表外），嵌入表无对应行；
             # 训练语料也未前置特殊 token，故回退到 id 0（与训练行为一致）。
-            ctx = [self.bos_id] if (self.bos_id is not None and 0 <= self.bos_id < self.vocab) else [0]
+            ctx = (
+                [self.bos_id]
+                if (self.bos_id is not None and 0 <= self.bos_id < self.vocab)
+                else [0]
+            )
         self.reset()
         logits = self.forward(np.array(ctx, dtype=np.int64))
         next_id = _sample(logits[-1], temperature, top_k, top_p, rng)

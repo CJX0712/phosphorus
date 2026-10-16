@@ -4,7 +4,7 @@
 > 单进程 CPU 可跑 · 零 GPU 依赖 · **零系统编译器依赖** · 可量化评测
 
 [![CI](https://github.com/CJX0712/phosphorus/actions/workflows/ci.yml/badge.svg)](https://github.com/CJX0712/phosphorus/actions/workflows/ci.yml)
-[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue.svg)](https://www.python.org)
+[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green.svg)](./LICENSE)
 
 Phosphorus 把「1.58-bit 三值 LLM」从论文搬到一台普通笔记本上：从 BPE 分词、CPU 训练、
@@ -39,13 +39,27 @@ python -m pip install -e "."
 python -c "import phosphorus.engine; print('no torch needed')"
 ```
 
+想用原生 C99 内核（位精确，tl 后端 prefill 实测 2.7×）？加装 `native` 分组
+（pip 安装 zig，**不需要系统 C 编译器**）：
+
+```bash
+python -m pip install -e ".[native]"
+python -m phosphorus bench --model ckpt/tiny.phos --tokens 64
+# 内核级 / 端到端基准（自动先校验 native 与 numpy 逐位相等）：
+python -m scripts.bench_kernels --reps 5
+python -m scripts.bench_native --model ckpt/tiny.phos --reps 7
+```
+
+> 未装 zig 时自动静默回退 NumPy 后端（结果不变，仅速度不同）。
+> 实测数字与调度规则见 [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) §4。
+
 ---
 
 ## 仓库结构（节选）
 
 ```
 phosphorus/
-├── phosphorus/         扁平包（T1–T3 已落地）
+├── phosphorus/         扁平包（T1–T3 已落地，T4-A 原生内核已落地）
 │   ├── tokenizer.py    BPE（Sennrich 2016）+ 字节级映射，CJK/emoji 无损往返
 │   ├── data.py         语料加载（离线兜底）+ memmap token 数据集
 │   ├── model.py        LLaMA 变体：Pre-RMSNorm / RoPE / GQA / ReLU² / SubLN + 三值 QAT + HGF
@@ -54,9 +68,19 @@ phosphorus/
 │   ├── gemm.py         GEMM 后端：TL(LUT) / I2_S / int32 参考
 │   ├── export.py       .phos 字节级导出
 │   ├── loader.py       .phos 加载（运行时零 torch）
-│   └── engine.py       纯 NumPy 推理（KV cache / 采样）
-├── csrc/phos.h         C99 原生内核 ABI 草案（T4）
-├── scripts/            setup.sh / setup.ps1 / smoke_zig.c
+│   ├── engine.py       推理引擎：NumPy + native 自适应调度（_use_native）
+│   ├── backend.py      实现后端注册：native / numpy（auto 降级）
+│   ├── csrc/           C99 原生内核源码（随 wheel 分发）
+│   │   ├── phos.h      ABI（version 1，scalar/AVX2 flags）
+│   │   ├── phos_gemm.c TL / I2_S GEMM（maddubs+madd，移植自 BitNet.cpp MIT）
+│   │   ├── phos_pack.c 5-bit pack/unpack
+│   │   └── phos_ops.c  rmsnorm / softmax / rope
+│   └── native/         zig cc 构建 + ctypes 绑定 + 行块并行
+│       ├── build.py    内容寻址缓存 + 文件锁 + 原子替换
+│       ├── bindings.py NativeKernels（ctypes 原型）
+│       └── parallel.py 行分块 + 线程池
+├── scripts/            setup.sh / setup.ps1 / smoke_zig.c / bench_kernels.py / bench_native.py
+├── NOTICE              第三方代码归属（BitNet.cpp I2_S SIMD 移植，MIT）
 └── docs/               ARCHITECTURE / TASKS / ALGORITHMS / BENCHMARKS
 ```
 
@@ -64,9 +88,9 @@ phosphorus/
 
 | 文档 | 内容 |
 |---|---|
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 总体架构、`.phos` 字节级格式、内核算法、7 条核心不变量 |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 总体架构、`.phos` 字节级格式、内核算法、8 条核心不变量 |
 | [`docs/TASKS.md`](docs/TASKS.md) | T1–T5 任务分解与验收标准 |
-| [`docs/ALGORITHMS.md`](docs/ALGORITHMS.md) | A-1…A-24 算法溯源（来源 / 选型理由 / 我们的超越点） |
+| [`docs/ALGORITHMS.md`](docs/ALGORITHMS.md) | A-1…A-25 算法溯源（来源 / 选型理由 / 我们的超越点 / 许可证） |
 | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | 全部实测数字（禁止写入未测量值） |
 
 ## 引用

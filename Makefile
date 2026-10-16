@@ -30,12 +30,16 @@ install-dev: ## 安装 core + train + dev 分组
 	$(PY) -m pip install -e ".[train,dev]"
 
 smoke-zig: ## 验证 zig cc 可用（O4 零编译器依赖构建）
-	$(ZIG) cc -O2 -o smoke_zig scripts/smoke_zig.c
-	./smoke_zig
+	$(ZIG) cc -O2 -o smoke_zig.exe scripts/smoke_zig.c
+	./smoke_zig.exe
 	@rm -f smoke_zig smoke_zig.exe
 
 build-native: ## 编译 C99 原生内核（T4 落地）
-	$(PY) -c "from phosphorus.kernels.native import build; print(build.ensure_library())"
+	$(PY) -c "from phosphorus.native import build; print(build.ensure_library())"
+
+native-info: ## 打印原生内核构建信息与可用后端
+	$(PY) -c "from phosphorus.native import kernels; k=kernels(); print(k.build_info(), 'avx2=', k.cpu_has_avx2())"
+	$(PY) -c "from phosphorus.backend import available_backends; print('available:', available_backends())"
 
 tokenize: ## 训练 BPE 分词器并生成 token 缓存
 	$(PY) -m phosphorus tokenize --corpus builtin --vocab-size 8192 --out artifacts/tokenizer.json
@@ -49,8 +53,8 @@ quantize: ## 导出 .phos
 generate: ## 文本生成
 	$(PY) -m phosphorus generate --model artifacts/tiny.phos --prompt "To be, or not to be"
 
-bench: ## 基准评测
-	$(PY) -m phosphorus bench --model artifacts/tiny.phos --backend fp32
+bench: ## 基准评测（PHOS_BACKEND 可选 native / numpy）
+	PHOS_BACKEND=$(or $(PHOS_BACKEND),auto) $(PY) -m phosphorus bench --model artifacts/tiny.phos --backend fp32
 
 test: ## 跑全部测试
 	$(PYTEST)

@@ -39,7 +39,8 @@
 
 > 下表给出**规划架构（本文 mermaid + §2.2）**与**已落地代码**的对照。
 > T1–T3 已交付为**扁平包** `phosphorus/`（单文件模块，无 `utils/`、`model/`、`quantize/`、`kernels/`、`speculate/`、`bench/`、`convert/` 子包）；
-> T4（原生 C99 内核）、T5（投机解码 / 基准 / Pareto）为**规划中**，见 `TASKS.md`。
+> T4（原生 C99 内核）已交付 **T4-A**（GEMM + pack + 归一化/softmax/RoPE 内核），
+> T4-B~E（分页 KV / 驱逐 / 连续批处理 / 投机解码）与 T5 为**规划中**，见 `TASKS.md`。
 
 | 规划模块 | 实际落地文件 | 状态 |
 |---|---|---|
@@ -51,9 +52,10 @@
 | `quantize/{packing,export}` | `phosphorus/packing.py` / `phosphorus/export.py` | ✅ T3（不变量①③） |
 | `kernels/numpy_backend/gemm` | `phosphorus/gemm.py` | ✅ T3（不变量①） |
 | `engine/model_loader` | `phosphorus/loader.py` | ✅ T3 |
-| `engine`（推理主循环） | `phosphorus/engine.py` | ✅ T3（不变量⑦） |
-| `kernels/native/*` | `csrc/phos.h`（仅头） | 🔜 T4 规划中 |
-| `speculate/*` / `bench/*` / `convert/*` | 未实现 | 🔜 T5 规划中 |
+| `engine`（推理主循环） | `phosphorus/engine.py` | ✅ T3（不变量⑦）+ T4-A 自适应 native 调度 |
+| `kernels/native/*` | `phosphorus/csrc/*.{c,h}` + `phosphorus/native/*` | ✅ T4-A（zig cc 编译，位精确） |
+| 实现后端注册 | `phosphorus/backend.py` | ✅ T4-A |
+| `speculate/*` / `bench/*` / `convert/*` | 未实现（基准脚本 `scripts/bench_*.py` 已随 T4-A 落地） | 🔜 T4-B~E / T5 规划中 |
 
 ---
 
@@ -180,10 +182,10 @@ phosphorus/
 ├── scripts/
 │   ├── setup.sh                       # Linux/macOS: venv + pip(NO_PROXY='*') + 内核编译
 │   ├── setup.ps1                      # Windows 等价
-│   └── smoke_zig.c                    # O4 zig cc 冒烟（T4 落地前提前验证）
+│   ├── smoke_zig.c                    # O4 zig cc 冒烟（T4 落地前提前验证）
+│   ├── bench_kernels.py               # T4-A 内核级基准（含位一致性校验）
+│   └── bench_native.py                # T4-A 端到端基准（native vs numpy）
 ├── .github/workflows/ci.yml           # ubuntu-latest, py3.10/3.11/3.12
-├── csrc/
-│   └── phos.h                         # 原生 C99 内核 ABI 头（T4 规划中）
 ├── phosphorus/                        # 扁平包（T1–T3 已落地；无 model/ quantize/ kernels/ speculate/ bench/ 子包）
 │   ├── __init__.py                    # __version__, backend 探测
 │   ├── __main__.py                    # python -m phosphorus
@@ -197,8 +199,19 @@ phosphorus/
 │   ├── packing.py                     # 三值 5-bit pack/unpack（合并自 quantize/packing）
 │   ├── gemm.py                        # TL / I2_S / int32 参考（合并自 kernels/numpy_backend/gemm）
 │   ├── loader.py                      # .phos 加载（合并自 engine/model_loader）
-│   ├── engine.py                      # 纯 numpy 推理引擎
-│   └── sampling.py                    # top-k / top-p / temp
+│   ├── engine.py                      # 推理引擎（numpy + native 自适应调度）
+│   ├── backend.py                     # 实现后端注册：native / numpy（T4-A）
+│   ├── sampling.py                    # top-k / top-p / temp
+│   ├── csrc/                          # 原生 C99 源码（随 wheel 分发）
+│   │   ├── phos.h                     # 原生内核 ABI 头（ABI version 1）
+│   │   ├── phos_gemm.c                # TL / I2_S GEMM（scalar + AVX2）
+│   │   ├── phos_pack.c                # 5-bit pack/unpack
+│   │   └── phos_ops.c                 # rmsnorm / softmax / rope
+│   └── native/                        # 原生库构建 + ctypes 绑定（T4-A）
+│       ├── __init__.py                # is_available / kernels / flags 导出
+│       ├── build.py                   # zig cc 编译 + 内容寻址缓存 + 文件锁
+│       ├── bindings.py                # NativeKernels（ctypes 原型 + 参数校验）
+│       └── parallel.py                # 行分块 + 线程池（N 维并行）
 ├── tests/
 │   ├── test_data.py                   # 数据集不变量
 │   ├── test_gemm_bitwise.py           # 不变量 ①
@@ -206,14 +219,19 @@ phosphorus/
 │   ├── test_tokenizer.py              # 不变量 ⑤
 │   ├── test_qat_ste.py                # 不变量 ⑥
 │   ├── test_loader.py                 # 三值 / HGF 往返 + 头字段
-│   └── test_engine.py                 # 不变量 ⑦
+│   ├── test_engine.py                 # 不变量 ⑦
+│   ├── test_hgf.py                    # HGF 低秩校正往返
+│   ├── test_rope.py                   # 不变量 ④
+│   ├── test_no_torch.py               # 推理路径零 torch 导入
+│   └── test_native_backend.py         # T4-A：native 内核 50 条断言（L0–L6）
 ├── data/raw/
 │   └── tinyshakespeare.txt            # 离线兜底语料（随仓库提交，1.1 MB）
+├── NOTICE                            # 第三方代码归属（BitNet.cpp I2_S SIMD 移植，MIT）
 └── docs/
     ├── ARCHITECTURE.md                # 本文
     ├── ALGORITHMS.md                  # 借鉴来源 + 超越点
     ├── TASKS.md                       # 任务分解
-    └── BENCHMARKS.md                  # 实测基准（T5 补全；含 T3 端到端数字）
+    └── BENCHMARKS.md                  # 实测基准（含 T4-A native vs numpy）
 ```
 
 ### 2.2 模块职责 / 输入 / 输出 / 关键数据结构
@@ -715,6 +733,45 @@ void phos_i2s_gemm(const int8_t* Wi8,       // [N, K], 值 ∈ {-1,0,1}
 
 **三级回退**：`native(zig cc)` → `numpy` → `pure-python(仅正确性兜底)`。回退必须在日志里显式 WARN，且 `phosphorus bench` 报告里标注 `backend_used`。
 
+> T4-A 落地情况：`native(zig cc)` 一级已实现（`phosphorus/native/` + `phosphorus/csrc/`），
+> `numpy` 一级已实现；`pure-python` 兜底未实现（numpy 已是硬依赖，该级仅作形式规划）。
+
+### 5.4 native 实现层（T4-A 落地）
+
+两个正交轴，代码里分开表达（`PhosModel.__init__`）：
+
+| 轴 | 取值 | 位置 |
+|---|---|---|
+| **数学后端** | `fp32` / `int8` / `tl` / `i2s` | `PhosModel.backend`（`--backend` CLI 参数） |
+| **实现后端** | `native` / `numpy` | `PhosModel.impl`（`phosphorus/backend.py` 注册，默认 `auto`） |
+
+**编译链**（`phosphorus/native/build.py`）：随 wheel 分发 C99 源码（`phosphorus/csrc/`），
+首次使用时调 `zig cc` 现场编译为共享库，按「ABI 版本 + zig 版本 + 目标三元组 +
+编译参数 + 全部源码字节的 sha256」做**内容寻址缓存**（`phos_native-<digest>.dll`），
+源码或工具链任一变化自动重编；文件锁（`O_CREAT|O_EXCL`，120s 超时）防多进程竞争；
+Windows 下加载中的 DLL 不可覆盖，故原子 rename（`.tmp<pid>` → 正式名）。
+
+**ABI 与数值契约**（`phosphorus/csrc/phos.h`，`PHOS_ABI_VERSION 1`）：
+
+- 全部内核提供 `unsigned flags` 参数（`PHOS_FLAG_SCALAR` / `PHOS_FLAG_AVX2`），
+  运行时 CPUID 探测（不用 `__builtin_cpu_supports`——zig 的 windows-gnu 目标不链
+  libgcc 的 `__cpu_model`），无 AVX2 的机器自动走 scalar，**数值结果不变**。
+- fp32 输出的缩放必须走 double 域左结合：`y = (float)((double)acc · (double)wscale · (double)sx)`，
+  与 numpy 参考（float64）逐位相等；`sx` 在 ABI 里是 `double` 而非 `float`
+  （早期版本用 `float` 导致 1 ULP 偏差，已修正）。
+- **位精确性是不变量 ① 的延伸**：native 与 numpy 在 int32 域、fp32 域都逐位相等，
+  由 `tests/test_native_backend.py` L0/L2 与 `scripts/bench_kernels.py` 每次运行断言。
+
+**自适应调度**（`PhosModel._use_native(T, N)`，实测 crossover 见 `BENCHMARKS.md` §4）：
+
+| 数学后端 | 规则 | 实测依据 |
+|---|---|---|
+| `tl` | 恒走 native | 全部形状 2.8x~6.8x（numpy 侧是逐 token Python 循环） |
+| `i2s` | `T == 1` 或 `N ≥ 1024` | 小 N + T>1 时 numpy 批量矩阵乘赢（0.74x）；N≥1024 时原生赢 4.6x~9.4x |
+
+**并行**（`phosphorus/native/parallel.py`）：仅按 N 维切行块（`PHOS_THREADS` 环境变量，
+默认 `min(8, cpu)`），行块结果与整块调用逐位相等（L5 断言）——因为累加顺序不变。
+
 ---
 
 ## 6. 自适应投机控制器（O2）
@@ -797,6 +854,7 @@ stateDiagram-v2
 | ⑤ | BPE encode→decode 恒等 | `test_bpe.py` | 对 10k 条含 emoji/CJK/控制字符文本，`decode(encode(s)) == s` |
 | ⑥ | QAT STE 梯度 == 数值梯度 | `test_qat_ste.py` | 前向量化点的反向梯度与 `finite_diff(·, h=1e-3)` 相对误差 < 5% |
 | ⑦ | KV 驱逐后注意力输出可控误差界 | `test_kv_eviction.py` | 50% 预算下，逐层注意力输出相对 L2 误差 < 10%，且 PPL 退化 < 10% |
+| ⑧ | native 与 numpy 实现在 int32/fp32 域**逐位相等**（T4-A） | `test_native_backend.py` | L0：`native.tl_i32 == native.i2s_i32 == int32_reference`；L2：fp32 输出与 float64 参考逐位相等；L5：行块切分 == 整块 |
 
 ---
 

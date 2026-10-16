@@ -294,14 +294,7 @@ class LlamaModel(nn.Module):
                         "引擎只支持三值权重。请改用 --mode qat-hgf 训练。"
                     )
                 w = blk.weight.detach().cpu().numpy().astype(np.float32)
-                s = (
-                    absmean(blk.weight)
-                    .reshape(-1)
-                    .detach()
-                    .cpu()
-                    .numpy()
-                    .astype(np.float32)
-                )
+                s = absmean(blk.weight).reshape(-1).detach().cpu().numpy().astype(np.float32)
                 ternary = np.clip(np.round(w / s.reshape(-1, 1)), -1, 1).astype(np.int8)
                 out[f"layers.{i}.{proj}.weight"] = ternary
                 out[f"layers.{i}.{proj}.scale"] = s

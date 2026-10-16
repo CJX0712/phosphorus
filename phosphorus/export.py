@@ -298,8 +298,10 @@ def inspect_phos(path: str | Path) -> str:
         f"pack_scheme={_PACK_NAMES.get(struct.unpack_from('<I', blob, 92)[0], '?')} "
         f"hgf_rank={struct.unpack_from('<I', blob, 96)[0]}"
     )
-    lines.append(f"crc32_header: stored=0x{crc_stored:08x} calc=0x{crc_calc:08x} "
-                 f"{'OK' if crc_stored == crc_calc else 'MISMATCH'}")
+    lines.append(
+        f"crc32_header: stored=0x{crc_stored:08x} calc=0x{crc_calc:08x} "
+        f"{'OK' if crc_stored == crc_calc else 'MISMATCH'}"
+    )
     lines.append("")
     lines.append(f"{'#':>3} {'name':<34} {'dtype':<15} {'shape':<16} {'offset':>10} {'bytes':>10}")
     total_packed = 0
@@ -320,6 +322,8 @@ def inspect_phos(path: str | Path) -> str:
             f"{str(shape):<16} {off:>10} {nb:>10}"
         )
     lines.append("")
-    lines.append(f"三值打包张量总字节: {total_packed:,} "
-                 f"（占文件 {total_packed / max(len(blob), 1) * 100:.1f}%）")
+    lines.append(
+        f"三值打包张量总字节: {total_packed:,} "
+        f"（占文件 {total_packed / max(len(blob), 1) * 100:.1f}%）"
+    )
     return "\n".join(lines)

@@ -146,11 +146,7 @@ def gemm_ternary_tl(
     packed: np.ndarray, xq: np.ndarray, w_scale: np.ndarray, x_scale: float, N: int, K: int
 ) -> np.ndarray:
     """TL 后端（打包域）：返回 fp32 输出 [N] = acc_int32 · w_scale · x_scale。"""
-    codes = (
-        packed
-        if np.asarray(packed).ndim == 2
-        else unpack_code5(packed, N, K).astype(np.int64)
-    )
+    codes = packed if np.asarray(packed).ndim == 2 else unpack_code5(packed, N, K).astype(np.int64)
     acc = tl_acc_i32(codes, xq, K)
     return (acc.astype(np.float64) * np.asarray(w_scale, np.float64) * float(x_scale)).astype(
         np.float32

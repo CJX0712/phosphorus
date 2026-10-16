@@ -1,0 +1,70 @@
+# NOTICE
+
+Phosphorus — 三值（BitNet b1.58）LLM 推理引擎
+Copyright (c) 2026 晨星 (CJX0712)
+Licensed under the Apache License, Version 2.0. See `LICENSE`.
+
+---
+
+## 1. 本项目包含的第三方代码（移植）
+
+### bitnet.cpp — I2_S SIMD 点积内核
+
+* 上游项目：<https://github.com/microsoft/BitNet>
+  （论文：<https://arxiv.org/abs/2502.11880>，"1-bit AI Infra: Fast and Lossless BitNet b1.58 Inference"）
+* 许可证：**MIT**
+* 移植位置：`phosphorus/csrc/phos_gemm.c` 中的
+  `i2s_rows_i32_avx2` / `i2s_rows_f32_avx2`
+* 移植内容：`_mm256_maddubs_epi16`（u8×i8→i16）与 `_mm256_madd_epi16`
+  （i16→i32）两条指令组成的 I2_S 点积序列，以及
+  `Σ(xu8−128)·W = Σxu8·W − 128·row_wsum` 的零点校正恒等式。
+* 移植理由：该恒等式与指令序列是数学/硬件层面的最优解，且在本项目
+  `|W| ≤ 1`（三值权重）约束下 pair-sum 上界 510 ≪ 32767，不会溢出
+  int16，可直接移植而无数值损失。
+* 修改说明：为适配本项目 ABI（运行时任意形状、N 维行块切分、scalar/AVX2
+  双路径、`unsigned flags` 分发）重写了函数签名与外围循环；核心 SIMD
+  点积序列保持原样。
+
+MIT 许可证要求保留的声明：
+
+```
+MIT License
+
+Copyright (c) Microsoft Corporation.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## 2. 仅作参考/思路来源（未复制代码）
+
+| 来源 | 许可证 | 用途 |
+|---|---|---|
+| T-MAC · [arXiv:2402.17953](https://arxiv.org/abs/2402.17953) | Apache-2.0 | int16 LUT（符号+索引 14 项）的理论基础；本项目按同一 LUT 定义自写实现（上游代码未复制） |
+| vLLM PagedAttention · [arXiv:2309.06180](https://arxiv.org/abs/2309.06180) | Apache-2.0 | 分页 KV / 连续批处理的设计思路（T4-B~D 规划） |
+| SnapKV · [arXiv:2404.14469](https://arxiv.org/abs/2404.14469) | Apache-2.0 | KV 驱逐策略思路（T4-C 规划） |
+| PyramidKV · [arXiv:2406.02069](https://arxiv.org/abs/2406.02069) | Apache-2.0 | KV 逐层预算分配思路（T4-C 规划） |
+| H2O · [arXiv:2306.14048](https://arxiv.org/abs/2306.14048) | MIT | Heavy-Hitter 驱逐策略思路（T4-C 规划） |
+| StreamingLLM · [arXiv:2309.17453](https://arxiv.org/abs/2309.17453) | MIT | attention sink 强制保留思路（T4-C 规划） |
+| llama.cpp / ggml | MIT | RMSNorm / RoPE / GQA 的公式与 fp64 累加范式（代码未复制，仅公式级参考） |
+| Leviathan et al. · [arXiv:2211.17192](https://arxiv.org/abs/2211.17192) | —（论文） | 投机采样严格验证算法（T5 规划） |
+
+## 3. 构建工具链
+
+* `ziglang`（pip 包，MIT）— 仅作为**构建期** C 编译器（`zig cc`），不进入
+  运行时产物；用户机器上无需安装任何系统 C 编译器。

@@ -119,11 +119,19 @@ def pack_ternary_v1(w: np.ndarray) -> tuple[np.ndarray, int]:
 
 
 def _codes_from_packed(packed: np.ndarray, N: int, Kpad: int) -> np.ndarray:
-    """从打包字节还原 code5 数组 [N, K_pad/3]（uint8，含符号位）。"""
+    """从打包字节还原 code5 数组 [N, K_pad/3]（uint8，含符号位）。
+
+    `packed` 可以是 numpy uint8 数组，也可以是 `bytes`/`bytearray`
+    （loader 的 `PhosFile.raw` 存的就是 bytes）—— `np.asarray(bytes, uint8)`
+    会把它当字符串标量而抛 ValueError，必须显式 `frombuffer`。
+    """
     nchunks = Kpad // WEIGHTS_PER_CHUNK
     ng = Kpad // 3
     need = N * nchunks * BYTES_PER_CHUNK
-    p = np.asarray(packed, dtype=np.uint8)
+    if isinstance(packed, (bytes, bytearray, memoryview)):
+        p = np.frombuffer(packed, dtype=np.uint8)
+    else:
+        p = np.asarray(packed, dtype=np.uint8)
     if p.size < need:
         raise ValueError(f"打包数据不足：需要 {need} 字节，实际 {p.size}")
     p = p[:need].reshape(N, nchunks, BYTES_PER_CHUNK)
