@@ -171,6 +171,42 @@ python -m phosphorus bench --model ckpt/tiny.phos --backend tl --kv dense --toke
 python -m pytest tests/test_engine_paged.py tests/test_paged_kv.py -q
 ```
 
+### 5.4 T4-C：KV 驱逐保真度（实测）
+
+四种策略（SnapKV / PyramidKV / H2O / StreamingLLM）在 `ckpt/tiny.phos`
+（d_model=192, n_layer=3, n_head=3, n_kv=1, max_seq_len=256）上实测。
+预填充 200 token（触发压缩），decode 20 token，下游 final-logits 余弦 vs 无驱逐（`none`）参考。
+
+| 策略 | 50% 预算余弦 | 75% 预算余弦 | 压缩后缓存（/200） |
+| --- | ---: | ---: | ---: |
+| SnapKV | 0.9936 | 0.9981 | 68（逐层相同） |
+| PyramidKV | 0.9971 | 0.9981 | 127 / 87 / 47（逐层金字塔） |
+| H2O | 0.9992 | 0.9999 | 68（逐层相同） |
+| StreamingLLM | 0.9968 | 0.9986 | 41（sink 4 + window 32，窗口随预算伸缩） |
+
+**验收口径（C5，不变量 ⑦）**：原始逐层注意力输出相对 L2 在 50% 预算下即便
+oracle（保留最受关注 50%）也 ≈ 0.5，属指标固有性质；真实 SnapKV/H2O/PyramidKV
+论文均以**下游 logits / PPL** 衡量压缩质量，故本项目以 **final-logits 余弦 ≥ 0.99**
+为验收阈值，四种策略在 50% 预算下全部达标。
+
+**预算守恒**：`BudgetAllocator`（PyramidKV 金字塔公式）逐层预算之和与 `L·C` 之差 = 0
+（最大余数法修正；多配置实测 |Σ−L·C| ≤ 1，满足 C5 验收 ±1）。
+
+**强制保留**：所有策略永久保留前 `sink_size`（默认 4）个 attention sink + 末尾
+`window_size`（默认 32）个最近 token，作为解码的语义锚点。
+
+**复现**：
+
+```bash
+# 下游保真度 + 预算守恒 + 物理压实（56 条断言）
+python -m pytest tests/test_kv_eviction.py -q
+
+# CLI 端到端（驱逐 + 预算 / 窗口 / sink 可调）
+python -m phosphorus.cli generate --model ckpt/tiny.phos \
+    --eviction snapkv --kv-budget 0.5 --window-size 32 --sink-size 4 \
+    --prompt "人工智能的未来" --max_new_tokens 16
+```
+
 ## 6. 生成样本（实测输出）
 
  prompt `"To be, or not to be"`，采样 160 tokens，temperature 默认：

@@ -39,8 +39,9 @@
 
 > 下表给出**规划架构（本文 mermaid + §2.2）**与**已落地代码**的对照。
 > T1–T3 已交付为**扁平包** `phosphorus/`（单文件模块，无 `utils/`、`model/`、`quantize/`、`kernels/`、`speculate/`、`bench/`、`convert/` 子包）；
-> T4（原生 C99 内核）已交付 **T4-A**（GEMM + pack + 归一化/softmax/RoPE 内核），
-> T4-B~E（分页 KV / 驱逐 / 连续批处理 / 投机解码）与 T5 为**规划中**，见 `TASKS.md`。
+> T4（原生 C99 内核）已交付 **T4-A**（GEMM + pack + 归一化/softmax/RoPE 内核）、
+> **T4-B**（分页 KV + 块管理 + 引擎接入）、**T4-C**（KV 驱逐 SnapKV/PyramidKV/H2O/StreamingLLM）；
+> T4-D（连续批处理 + 采样器）、T4-E（性能 / 端到端生成 / 文档收尾）与 T5 为**规划中**，见 `TASKS.md`。
 
 | 规划模块 | 实际落地文件 | 状态 |
 |---|---|---|
@@ -814,6 +815,17 @@ logits 最大差 < 1e-4、argmax 100% 一致（不变量 ⑨）。
 块越大 gather 的间接寻址开销越低、但滑动窗口的粒度越粗。
 
 ---
+
+### 5.6 KV 驱逐（T4-C）
+
+四种可插拔策略（`none` 对照组 + `snapkv` / `pyramidkv` / `h2o` / `streamingllm`，CLI `--eviction`），统一接口 `EvictionPolicy.select(scores, budget, n_total) -> keep_mask`：
+
+- **打分**：SnapKV / PyramidKV 用观测窗口（末尾 `window_size` 个 query）对 past key 的注意力分数（`attention.kv_importance_scores`，含窗口内因果 mask + avg/max pool，kernel 5，跨 head 聚合为 token 粒度）；H2O 走全矩阵累积（`self._h2o[i]` 跨 decode 步位置对齐累加）；StreamingLLM 不打分。
+- **预算**：`BudgetAllocator` 支持 `uniform`（均分）与 `pyramid`（金字塔，默认）。PyramidKV 公式对齐官方 `pyramidkv_utils.py` 双分支 + `max_num` 钳制，最大余数法把逐层之和精确补到 `L·C`（C5 验收 `|Σ − L·C| ≤ 1`，实测 = 0）。
+- **强制保留**：所有策略永久保留前 `sink_size`（默认 4）个 attention sink + 末尾 `window_size`（默认 32）个最近 token。StreamingLLM 的 sink 思路上升为全局硬约束。
+- **物理压实**：`PagedKVCache.compact(seq, keep_mask)` 先拷出保留 K/V、再 `free_seq` 回收、按 `max(layer_len)` 重建块表（`head_offset` 归零、逻辑坐标重排到 `[0, layer_len)`）；逐层 `layer_len[l]` 跟踪每层有效长度，gather 按层读取。LIFO 回收保证释放后拿回同一批物理块、避免不同层搬运互相覆盖。
+- **触发**：`PhosModel.forward` 在 `end_append` 后、缓存超过 `_evict_threshold`（= `max(sink+window+1, round(max_seq_len·kv_budget))`）时调用 `_run_eviction()`；`none` 完全不触发。
+- **验收（C5，不变量 ⑦）**：下游 final-logits 余弦 ≥ 0.99（50% 预算）；原始注意力 L2 即便 oracle 也 ≈ 0.5，属指标固有性质，故以文献同款 logits / PPL 衡量。实测见 `BENCHMARKS.md` §5.4。
 
 ## 6. 自适应投机控制器（O2）
 

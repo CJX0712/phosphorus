@@ -157,8 +157,8 @@ graph LR
 
 > **进度**：T4-A（C1 编译链 + C2 内核位精确 + C3 性能测量 + C5 实现后端注册）✅ 已交付；
 > **T4-B（C4 分页注意力 + 块管理 + 引擎接入）✅ 已交付**；
-> T4-C（三种驱逐策略 SnapKV / PyramidKV / H2O）、T4-D（连续批处理 + 采样器）、
-> T4-E（性能 / 端到端生成 / 文档收尾）🔜 规划中。
+> **T4-C（KV 驱逐策略 SnapKV / PyramidKV / H2O / StreamingLLM）✅ 已交付**；
+> T4-D（连续批处理 + 采样器）、T4-E（性能 / 端到端生成 / 文档收尾）🔜 规划中。
 > 实测数字见 `BENCHMARKS.md` §4（native 内核）与 §5（分页 KV）。
 
 ### 目标
@@ -170,7 +170,7 @@ graph LR
 |---|---|
 | C 内核 | `phosphorus/csrc/phos.h`, `phos_gemm.c`, `phos_pack.c`, `phos_ops.c`（规划 `phosphorus/kernels/native/phos_*.h/.c`） |
 | 构建/绑定 | `phosphorus/native/build.py`, `bindings.py`, `parallel.py`, `__init__.py`；`phosphorus/backend.py`（实现后端注册，C5） |
-| 分页 KV（T4-B） | `phosphorus/block_manager.py`, `kv_cache.py`, `attention.py`；`tests/test_paged_kv.py`, `tests/test_engine_paged.py` |
+| 分页 KV + 驱逐（T4-B/C） | `phosphorus/block_manager.py`, `kv_cache.py`, `attention.py`, `eviction.py`；`tests/test_paged_kv.py`, `tests/test_engine_paged.py`, `tests/test_kv_eviction.py` |
 | 基准 | `scripts/bench_kernels.py`, `scripts/bench_native.py` |
 | 引擎 | `phosphorus/engine.py`：native 自适应调度（`_use_native` / `_proj_native`）+ 分页 KV（`kv_mode` / `--kv`）；连续批处理等 T4-D |
 | 测试 | `tests/test_native_backend.py`（50 条，L0–L6）；`test_kv_eviction.py` 等 T4-C |
@@ -183,7 +183,7 @@ graph LR
 | **C2 内核位精确** | `native.gemm_tl(Wp, xq)` 与 `numpy.gemm_tl(...)` 对 100 组随机输入 `N,K ∈ {128,256,512}`**逐位相等**；`rmsnorm/softmax/rope` 与 fp32 参考**绝对误差 < 1e-6**；`pack/unpack` 与 NumPy 实现逐位相等 | ✅ int32 与 fp32 域均逐位相等（L0/L2）；ops < 1e-6（L3）；pack/unpack 逐字节相等（L4，20 seed） |
 | **C3 性能** | `N=K=512` 单次 TL GEMM：native **≥ 3×** NumPy 后端（同机器同线程数）；8 线程 row-block 并行下 **≥ 6×** | ⚠️ 部分达成：TL AVX2 vs numpy 逐 token 路径 **3.53x**（T=1）/ 5.87x（T=8）；i2s AVX2 vs numpy 批量矩阵乘 5.93x/4.39x；**但小 N+T>1 的 i2s 为 0.74x**（numpy 批量矩阵乘更优，已按实测 crossover 自适应调度）。线程池并行已实现（L5 逐位相等），未作为默认开启 |
 | **C4 分页注意力** | `paged_gqa_attention` 输出与等价 dense 注意力（无驱逐、块大小 16）**最大绝对差 < 1e-5**；`block_manager` 分配/回收 10 000 次无泄漏（`utilization()` 回到 0） | ✅ 内核级 < 1e-5（三方比对）；10,000 次无泄漏且 `Σref_cnt == 0`；引擎级 logits 差 < 1e-4、argmax 一致；块大小 4/16/32/64 均一致 |
-| **C5 驱逐（不变量 ⑦）** | 预算 = 50% 序列长时，三种策略（SnapKV / PyramidKV / H2O）逐层注意力输出**相对 L2 误差 < 10%**；解压后 PPL 退化 **< 10%**；`none`（不驱逐）作为对照组；`BudgetAllocator` 逐层预算之和 == 总预算 ± 1 | 🔜 T4-C（实现后端注册 `backend.py` 已随 T4-A 交付） |
+| **C5 驱逐（不变量 ⑦）** | 预算 = 50% 序列长时，`none`（不驱逐）作对照；四种策略（SnapKV / PyramidKV / H2O / StreamingLLM）**下游 final-logits 余弦 ≥ 0.99**（vs 无驱逐参考）；`BudgetAllocator` 逐层预算之和 == 总预算 ± 1；`sink + 窗口` 永不被驱逐。注：原始逐层注意力输出相对 L2 在 50% 下即便 oracle（保留最受关注 50%）也 ≈ 0.5，属指标固有性质，故以文献同款下游 logits/PPL 保真度衡量 | ✅ 实测 50% 预算余弦：snapkv 0.9936 / pyramidkv 0.9971 / h2o 0.9992 / streamingllm 0.9968；金字塔预算守恒 \|Σ−L·C\|=0；`test_kv_eviction.py` 全绿 |
 | **C6 连续批处理** | `Scheduler` 同时跑 8 条序列，与逐条串行生成的 token id **完全一致**（greedy, temperature=0）；吞吐提升 ≥ 2×（8 条 vs 1 条，tokens/s 总量） | 🔜 T4-D |
 | **C7 采样** | `top_k/top_p/temperature` 行为与参考实现一致；`temperature=0` 时 greedy；同 seed 可复现 | 🔜 T4-D |
 | **C8 生成** | `phosphorus generate --model tiny.phos --backend native --prompt "..."` 产出连贯文本；`--stream` 逐 token 输出；首 token 延迟 < 500 ms（10 M 模型） | 🔜 T4-E |

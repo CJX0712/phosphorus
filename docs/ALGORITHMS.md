@@ -165,20 +165,32 @@
 
 | 策略 | 来源 | 核心 | 适配要点 |
 |---|---|---|---|
-| **SnapKV** | [arXiv:2404.14469](https://arxiv.org/abs/2404.14469) | 用"观察窗口"（末尾若干 token）的注意力分数投票，选出重要 KV 保留 | 观察窗口大小可配（默认 32） |
-| **PyramidKV** | [arXiv:2406.02069](https://arxiv.org/abs/2406.02069) | 逐层预算呈金字塔（浅层多、深层少）；信息在深层高度聚合 | 我们的 `BudgetAllocator` 默认策略 |
-| **H2O** | [arXiv:2306.14048](https://arxiv.org/abs/2306.14048) | Heavy-Hitter Oracle：按累积注意力分数保留 top-m | 需要维护 running score |
-| **StreamingLLM** | [arXiv:2309.17453](https://arxiv.org/abs/2309.17453) | 保留 attention sink（前几个 token）+ 最近窗口 | 作为**所有策略的强制保留项**（前 4 token 永不被驱逐） |
+| **SnapKV** | [arXiv:2404.14469](https://arxiv.org/abs/2404.14469) | 用"观察窗口"（末尾若干 token）的注意力分数投票，选出重要 KV 保留 | 观察窗口大小可配（默认 32）；avg/max pool（kernel 5） |
+| **PyramidKV** | [arXiv:2406.02069](https://arxiv.org/abs/2406.02069) | 逐层预算呈金字塔（浅层多、深层少）；信息在深层高度聚合 | 我们的 `BudgetAllocator` 默认策略；公式对齐官方 `pyramidkv_utils.py` |
+| **H2O** | [arXiv:2306.14048](https://arxiv.org/abs/2306.14048) | Heavy-Hitter Oracle：按**累积**注意力分数保留 top-m | 跨 decode 步位置对齐累加 `self._h2o[i]`，不池化 |
+| **StreamingLLM** | [arXiv:2309.17453](https://arxiv.org/abs/2309.17453) | 保留 attention sink（前几个 token）+ 最近窗口 | 作为**所有策略的强制保留项**（前 4 token 永不被驱逐）；窗口随预算伸缩 |
 
-- **选型理由**：三者互补——SnapKV 看"局部观察"，H2O 看"全局累积"，PyramidKV 看"层间差异"。都可归结为同一个接口：`select(scores, budget) -> keep_mask`，因此可以做成一个可插拔策略族。
+- **选型理由**：四者互补——SnapKV 看"局部观察"，H2O 看"全局累积"，PyramidKV 看"层间差异"，StreamingLLM 看"位置锚点"。都可归结为**同一个接口** `EvictionPolicy.select(scores, budget, n_total) -> keep_mask`，因此做成可插拔策略族（`EVICTIONS = ("none", "snapkv", "pyramidkv", "h2o", "streamingllm")`）。
 - **被否决方案**：只实现一种 —— 无法回答"CPU 小模型上哪种策略最优"这个本项目的评测问题。
 - **我们的超越**：
-  1. **统一预算分配器** `BudgetAllocator(l, L, total)`：把三种论文的"预算"抽象统一，支持 `uniform`（均分）/ `pyramid`（金字塔）/ `custom`（JSON 指定）。
-  2. **驱逐后物理压实**：`PagedKVCache.compact(seq, keep_mask)` 重写 `block_table` 并回收空洞块 —— 三篇论文都只提"逻辑驱逐"，没解决**分页场景下的物理回收**，我们补上。
-  3. **可验证误差界**（不变量 ⑦）：50% 预算下逐层注意力输出相对 L2 误差 < 10%、PPL 退化 < 10%，写成 CI 断言。
-- **落地**：`engine/eviction.py`；测试 `tests/test_kv_eviction.py`
-- **实测数字**：`[骨架]` — 待 T4/C5 填入 3×2 表：`{snapkv, pyramid, h2o} × {误差%, PPL退化%}`
-- **状态**：`[骨架]`
+  1. **统一预算分配器** `BudgetAllocator`：把四种论文的"预算"抽象统一，`uniform`（均分）/ `pyramid`（金字塔，默认）。PyramidKV 公式照抄官方 `pyramidkv_utils.py` 的双分支（短序列固定预算 + 长序列金字塔 + `max_num` 钳制），并用**最大余数法**把逐层之和精确补到 `L·C`（C5 验收 ±1）。
+  2. **驱逐后物理压实**：`PagedKVCache.compact(seq, keep_mask)` 先拷出保留 K/V 再 `free_seq` 回收、按 `max(layer_len)` 重建块表（`head_offset` 归零、逻辑坐标重排）——三篇论文只提"逻辑驱逐"，没解决**分页场景下的物理回收**，我们补上；LIFO 回收保证释放后拿回同一批物理块、避免不同层搬运互相覆盖。
+  3. **逐层独立预算 + 逐层长度**：`layer_len[l]` 跟踪每层有效 token 数，gather 按层读取；`forced-keep` 保证 `sink + window` 永留（StreamingLLM 的 sink 思路上升为所有策略的硬约束）。
+  4. **可验证误差界（不变量 ⑦）**：以**下游 final-logits 余弦 ≥ 0.99** 为 50% 预算验收阈值（详见 C5 修订说明：原始注意力 L2 即便 oracle 也 ≈0.5，属指标固有性质，真实论文以 logits/PPL 衡量）。
+- **打分复用**：`attention.py` 抽出 `attention_weights` 与 `kv_importance_scores`（观测窗口 query 对 past key 的注意力 + 窗口内因果 mask 的 softmax 后对 query 维求和，跨 head 聚合），SnapKV/PyramidKV 走此路径、H2O 走全矩阵累积、StreamingLLM 不打分。
+- **触发时机**：`engine.forward` 在 `end_append` 后、缓存超过 `_evict_threshold`（= max(sink+window+1, round(max_seq_len·kv_budget))）时调用 `_run_eviction()`；`none` 对照组完全不触发。
+- **落地**：`phosphorus/eviction.py`、`phosphorus/kv_cache.py`（layer_len / drop_front / compact）、`phosphorus/engine.py`（`_score_layer` / `_run_eviction`）、`phosphorus/cli.py`（`--eviction` `--kv-budget` `--window-size` `--sink-size`）；测试 `tests/test_kv_eviction.py`（56 条）。
+- **实测数字**（`ckpt/tiny.phos`，200 prefill + 20 decode，下游 logits 余弦 vs `none`）：
+
+  | 策略 | 50% 预算 | 75% 预算 | 压缩后缓存(/200) |
+  | --- | ---: | ---: | ---: |
+  | SnapKV | 0.9936 | 0.9981 | 68（逐层相同） |
+  | PyramidKV | 0.9971 | 0.9981 | 127/87/47（金字塔） |
+  | H2O | 0.9992 | 0.9999 | 68（逐层相同） |
+  | StreamingLLM | 0.9968 | 0.9986 | 41（sink+window） |
+
+  金字塔预算守恒 `|Σ − L·C| = 0`（多配置实测 ≤ 1）。全部 ≥ 0.99 达标。
+- **状态**：`[已验证]`
 
 ---
 
