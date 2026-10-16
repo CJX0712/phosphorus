@@ -105,7 +105,13 @@ def cmd_generate(a: argparse.Namespace) -> None:
 
     cfg = build_config_from_args(a)
     model = PhosModel.from_file(
-        a.model, backend=getattr(a, "backend", "fp32"), kv_mode=getattr(a, "kv", "paged")
+        a.model,
+        backend=getattr(a, "backend", "fp32"),
+        kv_mode=getattr(a, "kv", "paged"),
+        eviction=getattr(a, "eviction", "none"),
+        kv_budget=getattr(a, "kv_budget", 0.5),
+        window_size=getattr(a, "window_size", 32),
+        sink_size=getattr(a, "sink_size", 4),
     )
     t0 = time.time()
     text = model.generate(
@@ -129,7 +135,13 @@ def cmd_bench(a: argparse.Namespace) -> None:
     from .engine import PhosModel
 
     model = PhosModel.from_file(
-        a.model, backend=getattr(a, "backend", "fp32"), kv_mode=getattr(a, "kv", "paged")
+        a.model,
+        backend=getattr(a, "backend", "fp32"),
+        kv_mode=getattr(a, "kv", "paged"),
+        eviction=getattr(a, "eviction", "none"),
+        kv_budget=getattr(a, "kv_budget", 0.5),
+        window_size=getattr(a, "window_size", 32),
+        sink_size=getattr(a, "sink_size", 4),
     )
     n = a.tokens
     # 特殊 token（如 <|bos|>）id 可能 >= vocab，嵌入表无对应行；回退到 id 0 做吞吐基准。
@@ -231,6 +243,15 @@ def build_parser() -> argparse.ArgumentParser:
     pg.add_argument(
         "--kv", default="paged", choices=["dense", "paged"], help="KV cache 模式（T4-B）"
     )
+    pg.add_argument(
+        "--eviction",
+        default="none",
+        choices=["none", "snapkv", "pyramidkv", "h2o", "streamingllm"],
+        help="KV 驱逐策略（T4-C，仅 paged 生效）",
+    )
+    pg.add_argument("--kv-budget", type=float, default=0.5, help="驱逐保留比例（默认 0.5）")
+    pg.add_argument("--window-size", type=int, default=32, help="强制保留的最近窗口大小")
+    pg.add_argument("--sink-size", type=int, default=4, help="强制保留的注意力锚点数")
     pg.add_argument("--max_new_tokens", type=int, default=None)
     pg.add_argument("--temperature", type=float, default=None)
     pg.add_argument("--top_k", type=int, default=None)
@@ -247,6 +268,15 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument(
         "--kv", default="paged", choices=["dense", "paged"], help="KV cache 模式（T4-B）"
     )
+    pb.add_argument(
+        "--eviction",
+        default="none",
+        choices=["none", "snapkv", "pyramidkv", "h2o", "streamingllm"],
+        help="KV 驱逐策略（T4-C，仅 paged 生效）",
+    )
+    pb.add_argument("--kv-budget", type=float, default=0.5, help="驱逐保留比例（默认 0.5）")
+    pb.add_argument("--window-size", type=int, default=32, help="强制保留的最近窗口大小")
+    pb.add_argument("--sink-size", type=int, default=4, help="强制保留的注意力锚点数")
     pb.set_defaults(func=cmd_bench)
 
     pk = sub.add_parser("tokenize", help="分词器训练 / 编解码")

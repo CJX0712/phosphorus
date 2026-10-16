@@ -32,7 +32,8 @@ import math
 
 import numpy as np
 
-from .attention import paged_gqa_attention
+from .attention import attention_weights, kv_importance_scores, paged_gqa_attention
+from .eviction import EVICTIONS, EvictionConfig, make_policy
 from .gemm import gemm_int8, tl_acc_i32
 from .loader import PhosFile, load_phos
 from .packing import k_pad, unpack_code5
@@ -49,6 +50,7 @@ BACKENDS: tuple[str, ...] = ("fp32", "int8", "tl", "i2s")
 
 # KV cache 模式（ARCHITECTURE.md §5.4 / TASKS.md C4）。
 KV_MODES: tuple[str, ...] = ("dense", "paged")
+# KV 驱逐策略（T4-C）：none = 不驱逐；其余见 eviction.EVICTIONS。
 DEFAULT_BLOCK_SIZE = 16
 
 
@@ -153,6 +155,10 @@ class PhosModel:
         native: str | None = None,
         kv_mode: str = "paged",
         block_size: int = DEFAULT_BLOCK_SIZE,
+        eviction: str = "none",
+        kv_budget: float = 0.5,
+        window_size: int = 32,
+        sink_size: int = 4,
     ) -> None:
         """构造推理模型。
 
@@ -163,6 +169,14 @@ class PhosModel:
 
         kv_mode ∈ {"dense", "paged"}：`paged`（默认，T4-B）用分页 KV 池 +
         block_tables；`dense` 是全量张量参考实现。二者数值等价（不变量 ⑨）。
+
+        eviction ∈ {"none", "snapkv", "pyramidkv", "h2o", "streamingllm"}（T4-C）：
+        KV 驱逐策略，仅在 `kv_mode="paged"` 下生效，把长序列 KV 压到预算内
+        （逐层预算 + 逐层保留掩码，不变量 ⑦——相对 L2 误差 < 10%）。`none`
+        表示完全不驱逐。`kv_budget` 为保留比例（默认 0.5 = 保留一半）。
+        `window_size`/`sink_size` 为强制保留的「最近窗口/注意力锚点」大小
+        （StreamingLLM 的发现；其余三策略原版不保留 sink，本项目统一保留，
+        属组合改进，已在 `docs/ALGORITHMS.md` A-8~A-11 标注）。
         """
         if backend not in BACKENDS:
             raise ValueError(f"未知后端 {backend!r}，可选 {BACKENDS}")
@@ -217,6 +231,39 @@ class PhosModel:
         else:
             self._mgr = None
             self.cache = _KVCache(self.n_layer, self.n_head, self.d_head)
+
+        # ---- T4-C：KV 驱逐（不变量 ⑦）------------------------------------- #
+        # 仅在 paged 模式下启用；层数/长度以物理池为准。
+        if eviction not in EVICTIONS:
+            raise ValueError(f"未知驱逐策略 {eviction!r}，可选 {EVICTIONS}")
+        self.eviction = eviction
+        self.kv_budget = float(kv_budget)
+        self._abs_dropped = 0  # 历史上被丢弃的 token 总数（RoPE 绝对位置重基准）
+        self._evict = None
+        if eviction != "none":
+            if kv_mode != "paged":
+                raise ValueError("驱逐策略仅在 kv_mode='paged' 下可用")
+            self._evict = make_policy(
+                eviction,
+                EvictionConfig(
+                    budget_ratio=self.kv_budget,
+                    window_size=window_size,
+                    sink_size=sink_size,
+                ),
+            )
+            # 高水位触发：达到 max_seq_len×budget 才压缩（vLLM 同款策略），
+            # 压缩目标 = 压缩瞬间序列长度的 ratio（对 50% 预算即压到一半）。
+            self._evict_threshold = max(
+                sink_size + window_size + 1,
+                int(round(self.max_seq_len * self.kv_budget)),
+            )
+            # 每层本步窗口打分（SnapKV/PyramidKV）；H2O 用跨步累积分数。
+            self._win_scores: list[np.ndarray] = [
+                np.zeros((self.n_head, 0), dtype=np.float32) for _ in range(self.n_layer)
+            ]
+            self._h2o: list[np.ndarray] = [
+                np.zeros((self.n_head, 0), dtype=np.float32) for _ in range(self.n_layer)
+            ]
 
         # 特殊 token id
         self.bos_id = self.tok.specials.get("<|bos|>") if self.tok else None
@@ -275,6 +322,10 @@ class PhosModel:
         native: str | None = None,
         kv_mode: str = "paged",
         block_size: int = DEFAULT_BLOCK_SIZE,
+        eviction: str = "none",
+        kv_budget: float = 0.5,
+        window_size: int = 32,
+        sink_size: int = 4,
     ) -> PhosModel:
         return cls(
             load_phos(path),
@@ -282,6 +333,10 @@ class PhosModel:
             native=native,
             kv_mode=kv_mode,
             block_size=block_size,
+            eviction=eviction,
+            kv_budget=kv_budget,
+            window_size=window_size,
+            sink_size=sink_size,
         )
 
     # ----------------------------- 工具 ----------------------------- #
@@ -383,22 +438,26 @@ class PhosModel:
             tokens = tokens[T - self.max_seq_len :]
             T = self.max_seq_len
         start = self.cache_len()
-        # 超过最大长度时做滑动窗口截断（简易 SnapKV 风格）
+        # 超过最大「逻辑」长度（cache_len）时做滑动窗口截断——这是 RoPE 表边界
+        # 守卫，必须用逻辑坐标，绝不能用绝对坐标（否则驱逐后仍会触发，破坏
+        # layer_len / mgr.seq_len 一致性）。绝对坐标只用于取 RoPE 表。
         if start + T > self.max_seq_len:
             drop = start + T - self.max_seq_len
             if self.kv_mode == "paged":
-                self._mgr.drop_tokens(0, drop)
+                self.cache.drop_front(0, drop)
             else:
                 for i in range(self.n_layer):
                     self.cache.k[i] = self.cache.k[i][:, :, drop:, :]
-                    self.cache.v[i] = self.cache.v[i][:, :, drop:, :]
+                    self.cache.v[i] = self.cache.v[i][:, drop:, :]
+            self._abs_dropped += drop
             start = self.cache_len()
+        # 绝对位置 = 已丢弃总数 + 当前缓存长度（对齐 RoPE，驱逐/截断后依然正确）
+        abs_start = self._abs_dropped + start
 
         x = self.tok_emb[tokens].astype(np.float32)  # [T, d]
         self._hiddens = []
         self._dbg = {}
-        cos = self._cos[start : start + T]
-        sin = self._sin[start : start + T]
+        cos, sin = self._rope_slice(abs_start, T)
         Tk = self.cache_len()
 
         for i in range(self.n_layer):
@@ -430,7 +489,13 @@ class PhosModel:
                         f"（max_seq_len={self.max_seq_len}, block_size={self.block_size}）"
                     )
                 self.cache.write(0, i, kkv[0].transpose(1, 0, 2), vkv[0].transpose(1, 0, 2))
-                out = paged_gqa_attention(q, self.cache, 0, i, self.n_rep, Tk)
+                # q_start = 本批 query 在 KV 序列中的逻辑起点 = 写入前缓存长度（start）。
+                # 注意：绝不能取 layer_len[i]（write 已 +T，会错位 T 并破坏因果掩码）；
+                # 各层 query 起点相同，逐层差异只在「key 数量」（已由 gather 按 layer_len 读取）。
+                q_start = int(start)
+                out = paged_gqa_attention(q, self.cache, 0, i, self.n_rep, q_start)
+                if self._evict is not None:
+                    self._score_layer(i, q)
             else:
                 k = np.repeat(kkv, self.n_rep, axis=1)
                 v = np.repeat(vkv, self.n_rep, axis=1)
@@ -471,6 +536,9 @@ class PhosModel:
 
         if self.kv_mode == "paged":
             self.cache.end_append(0)
+            # T4-C：达到高水位则按策略压缩 KV（逐层预算 + 逐层保留掩码）
+            if self._evict is not None and self.cache_len() > self._evict_threshold:
+                self._run_eviction()
 
         x = x * self.norm_final
         emb = self.tok_emb if self.tied else self.lm_head
@@ -483,6 +551,76 @@ class PhosModel:
     def cache_len(self) -> int:
         """当前 KV cache 中的 token 数（dense 与 paged 统一接口）。"""
         return self.cache.mgr.seq_len(0) if self.kv_mode == "paged" else self.cache.len()
+
+    def _rope_slice(self, start: int, T: int) -> tuple[np.ndarray, np.ndarray]:
+        """取 RoPE 表 [start:start+T]，必要时惰性扩容（绝对位置可超过 max_seq_len）。"""
+        need = start + T
+        if need > self._cos.shape[0]:
+            new_len = max(need, 2 * self._cos.shape[0])
+            self._cos, self._sin = _build_rope(self.rope_theta, self.d_head, new_len)
+        return self._cos[start : start + T], self._sin[start : start + T]
+
+    # ----------------------------- T4-C 驱逐 ----------------------------- #
+    def _score_layer(self, i: int, q: np.ndarray) -> None:
+        """为第 i 层计算驱逐分数（SnapKV 窗口打分 / H2O 跨步累积）。
+
+        q: [1, H, T, Dh]（RoPE 已应用）。分数对应「窗口之外全部历史 token」
+        （即前 `n_past = layer_len - sink - window` 个），与 `EvictionPolicy.select`
+        的候选段切分严格对齐。
+        """
+        pol = self._evict
+        n = int(self.cache.layer_len[i])
+        n_past = pol.n_past_of(n)
+        W = pol.cfg.window_size
+        if n_past <= 0:
+            self._win_scores[i] = np.zeros((self.n_head, 0), dtype=np.float32)
+            return
+        k, _ = self.cache.gather_heads(0, i, self.n_rep)  # [1, H, n, Dh]
+        kp = k[:, :, :n_past, :]
+        if pol.name in ("snapkv", "pyramidkv"):
+            w = min(W, q.shape[2])
+            self._win_scores[i] = kv_importance_scores(q[:, :, q.shape[2] - w :, :], kp)
+        elif pol.name == "h2o":
+            aw = attention_weights(q, k, n - q.shape[2], causal=True)
+            cur = aw[:, :, :, :n_past].sum(axis=2)[0]  # [H, n_past]，本步对各历史 token 的注意力
+            # 跨步累积（位置对齐）：保留段累加本步注意力、新段（窗口滑出的 token）
+            # 从本步起算。压缩后 _h2o 已按 keep_mask 聚到保留 token，r = 保留数 ≤ n_past。
+            r = self._h2o[i].shape[1]
+            new = np.zeros((self.n_head, n_past), dtype=np.float32)
+            if r > 0:
+                new[:, :r] = self._h2o[i] + cur[:, :r]
+            new[:, r:] = cur[:, r:]
+            self._h2o[i] = new
+        # streamingllm：不依赖分数（只保留 sink + 最近窗口），无需打分
+
+    def _run_eviction(self) -> None:
+        """按策略逐层选 token 并压缩 KV；更新 `_abs_dropped` 与 RoPE 基准。"""
+        pol = self._evict
+        n_total = self.cache_len()
+        if n_total <= 0:
+            return
+        masks = np.zeros((self.n_layer, n_total), dtype=bool)
+        for i in range(self.n_layer):
+            kl = int(self.cache.layer_len[i])
+            if kl <= 0:
+                continue
+            if pol.name in ("snapkv", "pyramidkv"):
+                scores = self._win_scores[i]
+            else:
+                scores = self._h2o[i]
+            budget = pol.layer_budget(i, self.n_layer, n_total)
+            masks[i, :kl] = pol.select(scores, budget, kl)
+        if pol.name == "h2o":
+            for i in range(self.n_layer):
+                kl = int(self.cache.layer_len[i])
+                sink = min(pol.cfg.sink_size, kl)
+                scored_hi = kl - min(pol.cfg.window_size, max(0, kl - sink))
+                n_past = scored_hi - sink
+                if n_past > 0 and self._h2o[i].shape[1] == n_past:
+                    self._h2o[i] = np.ascontiguousarray(self._h2o[i][:, masks[i, sink:scored_hi]])
+        before = n_total
+        self.cache.compact(0, masks)
+        self._abs_dropped += before - self.cache_len()
 
     def reset(self) -> None:
         self.cache.reset()

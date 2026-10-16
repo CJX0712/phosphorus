@@ -190,13 +190,13 @@ class TestPagedKVCache:
 
     def test_gather_after_drop(self):
         """滑动窗口丢弃后 gather 只返回保留的 token。"""
-        cache, mgr = self._mk(block_size=4)
+        cache, _ = self._mk(block_size=4)
         rng = np.random.default_rng(3)
         T = 20
         k = rng.standard_normal((T, 2, 4)).astype(np.float32)
         v = rng.standard_normal((T, 2, 4)).astype(np.float32)
         assert cache.append(0, 0, k, v) is True
-        mgr.drop_tokens(0, 6)  # head_offset=2，seq_len=14
+        cache.drop_front(0, 6)  # 经缓存层：同步 mgr.seq_len 与 layer_len，head_offset=2，seq_len=14
         gk, _ = cache.gather(0, 0)
         assert gk.shape[0] == 14
         assert np.array_equal(gk, k[6:])
@@ -251,7 +251,7 @@ class TestAttentionAlignment:
         """滑动窗口后分页结果 == 对保留子集的 dense 注意力。"""
         rng = np.random.default_rng(7)
         H, Dh, n_kv = 4, 8, 2
-        cache, mgr = self._mk(n_kv=n_kv)
+        cache, _ = self._mk(n_kv=n_kv)
         n_rep = H // n_kv
         S = 24
         k_base = rng.standard_normal((1, n_kv, S, Dh)).astype(np.float32)
@@ -259,7 +259,7 @@ class TestAttentionAlignment:
         k_all = np.repeat(k_base, n_rep, axis=1)
         v_all = np.repeat(v_base, n_rep, axis=1)
         self._write_kv(cache, k_base[0].transpose(1, 0, 2), v_base[0].transpose(1, 0, 2))
-        mgr.drop_tokens(0, 10)  # 丢最旧 10 个，保留 [10, 24)
+        cache.drop_front(0, 10)  # 丢最旧 10 个，保留 [10, 24)；同步 layer_len 与 mgr.seq_len
         q = rng.standard_normal((1, H, 2, Dh)).astype(np.float32)
         # drop 之后 query 的位置要换成**保留坐标系**（首个保留 token 下标为 0）
         got = paged_gqa_attention(q, cache, 0, 0, n_rep, q_start=0)
