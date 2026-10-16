@@ -42,7 +42,8 @@
 > T4（原生 C99 内核）已交付 **T4-A**（GEMM + pack + 归一化/softmax/RoPE 内核）、
 > **T4-B**（分页 KV + 块管理 + 引擎接入）、**T4-C**（KV 驱逐 SnapKV/PyramidKV/H2O/StreamingLLM）；
 > **T4-D**（连续批处理调度器 + 融合前向 + 采样器）已交付：8 条序列融合前向 token id 与逐条串行逐位一致，吞吐 **2.35×**；
-> T4-E（性能 / 端到端生成 / 文档收尾）与 T5 为**规划中**，见 `TASKS.md`。
+> **T4-E**（端到端生成 C8 + 文档收尾）已交付：`phosphorus generate` 连贯文本 + `--stream` 逐 token + `--bench` 首 token 延迟实测 4/18 ms（≪500ms），全量文档同步；
+> T5 为**规划中**，见 `TASKS.md`。
 
 | 规划模块 | 实际落地文件 | 状态 |
 |---|---|---|

@@ -267,11 +267,28 @@ Than give you thy shall the to
 古英语用词（`thou`/`canst`/`hath`/`thy`）与标点节奏。词法尚松散，
 属预期内——参数量与步数决定的容量上限。
 
+### 6.1 C8 端到端生成验收（实测）
+
+`phosphorus generate --model ckpt/tiny.phos --prompt "..."` 在纯 numpy 与
+native（`--backend tl`）两条路径下均产出**莎士比亚式连贯文本**（对白格式、角色名、
+古英语）；`--stream` 逐 token 实时输出；`--bench` 打印首 token 延迟与吞吐。
+
+| 路径 | prompt | 首 token 延迟（prefill） | 吞吐（40 tok） |
+| --- | --- | --- | --- |
+| fp32（numpy） | `Once upon a time` | **0.004 s** | 218.3 tok/s |
+| `tl`（native C99） | `Once upon a time` | **0.018 s** | 187.9 tok/s |
+
+**验收（C8）**：首 token 延迟远小于 500 ms（10 M 模型上限；tiny 模型 d_model=192/3 层
+更轻，native 路径也仅 18 ms）；连贯性与 `--stream` 由 `phosphorus generate` 实测确认。
+> 注：CLI 的「原生 C99 内核」对应 `--backend tl` / `--backend i2s`（ABI 位精确，
+> 由 `native/` 构建注入），无独立 `native` 枚举值——这是后端注册表（A-? `backend.py`）
+> 的命名，与 README §原生 C99 内核 描述一致。
+
 ## 7. 质量门（实测）
 
 | 检查 | 结果 |
 |---|---|
-| pytest | **127/127 通过**（含 50 条 native 内核 + 27 条分页 KV/引擎等价测试） |
+| pytest | **119 passed / 6 skipped**（含 50 条 native 内核 + 27 条分页 KV/引擎等价 + 8 条连续批处理 T4-D；skipped=缺失 ckpt 的对照用例） |
 | ruff check / format | 干净 |
 | native vs numpy 位一致性 | int32 与 fp32 域均逐位相等（不变量 ① / ⑧） |
 | paged vs dense 引擎级一致性 | logits 最大差 < 1e-4、argmax 完全一致（不变量 ⑨） |

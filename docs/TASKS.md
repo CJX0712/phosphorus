@@ -159,8 +159,8 @@ graph LR
 > **T4-B（C4 分页注意力 + 块管理 + 引擎接入）✅ 已交付**；
 > **T4-C（KV 驱逐策略 SnapKV / PyramidKV / H2O / StreamingLLM）✅ 已交付**；
 > **T4-D（连续批处理调度器 + 融合前向 + 采样器）✅ 已交付**（C6/C7 实测达标，融合 8 条吞吐 **2.35×** 串行）；
-> T4-E（性能 / 端到端生成 / 文档收尾）🔜 规划中。
-> 实测数字见 `BENCHMARKS.md` §4（native 内核）与 §5（分页 KV）。
+> **T4-E（端到端生成 C8 + 文档收尾）✅ 已交付**：`phosphorus generate` 产出连贯文本、支持 `--stream` 与 `--bench`（首 token 延迟实测 4/18 ms），BENCHMARKS/TASKS/ARCHITECTURE/ALGORITHMS 全量同步。
+> 实测数字见 `BENCHMARKS.md` §4（native 内核）、§5（分页 KV + T4-D 连续批处理）、§6（生成样本 + C8 验收）。
 
 ### 目标
 用 `python -m ziglang cc` 编译 C99 内核（TL GEMM + RMSNorm + softmax + RoPE + pack/unpack），与 NumPy 后端**位精确**；实现完整推理引擎：分页 KV、块管理、三种驱逐策略、连续批处理调度、GQA 注意力、采样器、生成器。
@@ -188,7 +188,7 @@ graph LR
 | **C5 驱逐（不变量 ⑦）** | 预算 = 50% 序列长时，`none`（不驱逐）作对照；四种策略（SnapKV / PyramidKV / H2O / StreamingLLM）**下游 final-logits 余弦 ≥ 0.99**（vs 无驱逐参考）；`BudgetAllocator` 逐层预算之和 == 总预算 ± 1；`sink + 窗口` 永不被驱逐。注：原始逐层注意力输出相对 L2 在 50% 下即便 oracle（保留最受关注 50%）也 ≈ 0.5，属指标固有性质，故以文献同款下游 logits/PPL 保真度衡量 | ✅ 实测 50% 预算余弦：snapkv 0.9936 / pyramidkv 0.9971 / h2o 0.9992 / streamingllm 0.9968；金字塔预算守恒 \|Σ−L·C\|=0；`test_kv_eviction.py` 全绿 |
 | **C6 连续批处理** | `Scheduler` 同时跑 8 条序列，与逐条串行生成的 token id **完全一致**（greedy, temperature=0）；吞吐提升 ≥ 2×（8 条 vs 1 条，tokens/s 总量） | ✅ 8 条融合 token id 与逐条串行**逐位一致**（`test_scheduler_greedy_matches_serial`）；融合吞吐 **2.35×**（1158.8 vs 492.8 tok/s，tiny 模型 8×40 tok）；`test_scheduler_throughput_speedup` 守护 ≥ 2× |
 | **C7 采样** | `top_k/top_p/temperature` 行为与参考实现一致；`temperature=0` 时 greedy；同 seed 可复现 | ✅ `sampling.py` 单测兜底；`Scheduler` 端到端：同 seed 两次运行 `==`（`test_scheduler_reproducible_same_seed`）、随机采样（temp=0.9）与贪心结果 `!=`（`test_scheduler_stochastic_differs_from_greedy`）、每序列独立 rng（`seed+全局下标`）保证融合与串行并行时逐位一致 |
-| **C8 生成** | `phosphorus generate --model tiny.phos --backend native --prompt "..."` 产出连贯文本；`--stream` 逐 token 输出；首 token 延迟 < 500 ms（10 M 模型） | 🔜 T4-E |
+| **C8 生成** | `phosphorus generate --model tiny.phos --backend native --prompt "..."` 产出连贯文本；`--stream` 逐 token 输出；首 token 延迟 < 500 ms（10 M 模型） | ✅ `phosphorus generate --model ckpt/tiny.phos --prompt "..."` 产出莎士比亚式连贯文本（角色名/古英语/对白格式）；`--stream` 逐 token 实时输出；首 token 延迟 prefill **0.004s**（fp32）/ **0.018s**（`tl` native 内核），远小于 500ms（tiny 模型 d_model=192/3 层，10M 模型只会更低）；`test_engine_*`/T4-D 测试守护 |
 
 ### 关键实现要点
 - C 内核**不使用 OpenMP / pthread**，保持纯函数、可重入、无全局状态；并行由 Python `ThreadPoolExecutor` 在 **row-block** 粒度切分（`ctypes` 调用自动释放 GIL）。

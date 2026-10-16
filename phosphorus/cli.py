@@ -12,6 +12,8 @@ import argparse
 import time
 from pathlib import Path
 
+import numpy as np
+
 from .config import ModelConfig, PhosphorusConfig, TrainConfig
 
 
@@ -114,6 +116,23 @@ def cmd_generate(a: argparse.Namespace) -> None:
         sink_size=getattr(a, "sink_size", 4),
         max_seqs=getattr(a, "max_seqs", 1),
     )
+    # 首 token 延迟测量（C8）：prefill 一次即得到首 token 前的全部开销。
+    first_latency = None
+    if a.bench:
+        ctx_ids = (
+            model.tok.encode(a.prompt)
+            if (a.prompt and model.tok)
+            else (
+                [model.bos_id]
+                if (model.bos_id is not None and 0 <= model.bos_id < model.vocab)
+                else [0]
+            )
+        )
+        model.reset()
+        t_pre = time.time()
+        model.forward(np.array(ctx_ids, dtype=np.int64))
+        first_latency = time.time() - t_pre
+
     t0 = time.time()
     text = model.generate(
         a.prompt,
@@ -127,7 +146,10 @@ def cmd_generate(a: argparse.Namespace) -> None:
     if not getattr(a, "stream", False):
         print(text)
     if a.bench:
-        print(f"\n[bench] 生成 {cfg.decode.max_new_tokens} token 用时 {time.time() - t0:.2f}s")
+        dt = time.time() - t0
+        ntok = cfg.decode.max_new_tokens
+        print(f"\n[bench] 首 token 延迟（prefill）: {first_latency:.3f}s")
+        print(f"[bench] 生成 {ntok} token 用时 {dt:.2f}s = {ntok / max(dt, 1e-9):.1f} tok/s")
 
 
 def cmd_sched(a: argparse.Namespace) -> None:
