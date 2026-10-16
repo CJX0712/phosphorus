@@ -145,17 +145,19 @@
 
 ### A-7 分页 KV + 连续批处理（PagedAttention）
 
-- **来源**：vLLM — *Efficient Memory Management for LLM Serving with PagedAttention*，Kwon et al.，SOSP'23，[arXiv:2309.06180](https://arxiv.org/abs/2309.06180)
+- **来源**：vLLM — *Efficient Memory Management for LLM Serving with PagedAttention*，Kwon et al.，SOSP'23，[arXiv:2309.06180](https://arxiv.org/abs/2309.06180)；块层实现参照 vLLM v1 [`block_pool.py`](https://github.com/vllm-project/vllm/blob/main/vllm/v1/core/block_pool.py)（Apache-2.0）
 - **要点**：KV cache 切成固定大小 block（本项目 16 token），逻辑序列通过 `block_table` 映射到物理块；调度器做 continuous batching（每步动态加入/移除序列）。
 - **选型理由**：这是唯一能把 KV 显存（内存）碎片率降到 < 4% 的方案；且天然支持抢占与变长序列。
 - **被否决方案**：朴素 `[S, L, H, D]` 预分配 —— 内存浪费 60–80%，且无法连续批处理。
 - **我们的超越**：
-  - **移植到 NumPy/CPU**：vLLM 依赖 CUDA kernel，我们用 `np.take` + `block_table` 索引实现等价语义，并在 `test_paged_attention.py` 断言与 dense 注意力误差 < 1e-5。
-  - **块大小 16**（vLLM 默认 16 on GPU，但 CPU 小模型下我们实测 16 vs 32 vs 64 的吞吐，选最优）。
-  - **KV int8 量化 + per-block scale**（`flags.KV_INT8`），CPU 内存带宽受限场景下再省 2×。
-- **落地**：`engine/block_manager.py`、`engine/kv_cache.py`、`engine/scheduler.py`、`engine/attention.py`；测试 `tests/test_paged_attention.py`、`tests/test_scheduler.py`
-- **实测数字**：`[骨架]` — 待 T4/C4,C6：`分页 vs dense 最大误差 __`；`batch=8 吞吐提升 __×`；`碎片率 __%`
-- **状态**：`[骨架]`
+  - **移植到 NumPy/CPU**：vLLM 依赖 CUDA kernel，我们用 fancy-indexing + `block_table` 实现等价语义，并在 `test_paged_kv.py` 断言与 dense 注意力误差 < 1e-5（另与朴素逐元素实现三方比对）。
+  - **块大小 16**（vLLM 默认 16 on GPU，但 CPU 小模型下我们实测 16 vs 32 vs 64 的吞吐，选最优）——T4-B 实测 4/16/32/64 数值一致，默认 16。
+  - **只存 `n_kv_head` 份**：读取时 `np.repeat` 展开（精确拷贝），注意力计算量随 GQA 比下降；dense 参考则先展开后计算，两者逐元素等价（不变量 ⑨）。
+  - **`head_offset` 滑动窗口**：丢弃任意数量 token 只回收整块 + 累加首块偏移，逻辑→物理映射永不错位（vLLM 滑动窗口后端同款思路）。
+  - KV int8 量化 + per-block scale（`flags.KV_INT8`）——🔜 未实现（当前 fp32，留待 T4-C 之后按需启用）。
+- **落地**：`phosphorus/block_manager.py`、`phosphorus/kv_cache.py`、`phosphorus/attention.py`、`phosphorus/engine.py`（`kv_mode`/`--kv`）；测试 `tests/test_paged_kv.py`（20 条）、`tests/test_engine_paged.py`（7 条）。连续批处理 `scheduler.py` 🔜 T4-D。
+- **实测数字**：`[已验证]` — 内核级 paged vs dense 最大差 < 1e-5；引擎级 logits 差 < 1e-4、argmax 100% 一致；块管理 10,000 次分配/回收无泄漏；吞吐见 `BENCHMARKS.md` §5：tl prefill **1.30×**（paged 更快，注意力只算 n_kv 头）、i2s decode 0.88×（gather 固定开销未被 T=1 摊销）；batch=8 吞吐与碎片率 🔜 T4-D。
+- **状态**：`[已验证]`（分页 KV + 块管理 + 注意力）/ `[骨架]`（连续批处理，T4-D）
 
 ---
 

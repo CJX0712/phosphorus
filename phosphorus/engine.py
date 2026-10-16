@@ -4,11 +4,17 @@
 使用三值 TL GEMM（W_ternary @ xq，等价 int32 参考）与可选 HGF 低秩校正，
 支持 KV cache 的 prefill / decode 与 temperature / top-k / top-p 采样。
 
+KV cache 两种模式（`kv_mode`）：
+* `dense` —— 每层一份 `[1, n_head, T, d_head]` 全量张量（参考实现）；
+* `paged` —— 分页物理池 + block_tables（vLLM 语义，T4-B 默认），
+  只存 `n_kv_head` 份，读取时 GQA 展开；两种模式数值等价（不变量 ⑨）。
+
 借鉴来源：
     * llama2.c 的 Llama.run / kv cache 设计（Karpathy）— A-16
     * BitNet 三值 GEMM（见 gemm.py，TL 路径数值权威）— A-1/A-3
     * RoPE 旋转编码（Su et al., 2021）— A-16
     * HGF 低秩 FP 校正（Pizzo, 2026）— A-11
+    * vLLM PagedAttention 块管理语义（Apache-2.0）— A-7 / A-25
 
 不变量（详见 docs/ARCHITECTURE.md §7）：
     ① engine 的三值 GEMM 与 gemm.int32_reference 在 int32 域逐位一致
@@ -16,6 +22,7 @@
     ④ RoPE 与 model.apply_rope 数值一致（同一公式）
     ⑤ encode->decode 恒等（tokenizer）
     ⑦ 同一输入 engine 与 torch 模型 logits 相对误差 < 5%
+    ⑨ paged 注意力与 dense 参考最大绝对差 < 1e-5（T4-B）
 """
 
 from __future__ import annotations
@@ -25,6 +32,7 @@ import math
 
 import numpy as np
 
+from .attention import paged_gqa_attention
 from .gemm import gemm_int8, tl_acc_i32
 from .loader import PhosFile, load_phos
 from .packing import k_pad, unpack_code5
@@ -38,6 +46,10 @@ logger = logging.getLogger(__name__)
 #   tl   —— 真·LUT：直接吃 5-bit 打包 code5，查 14 项 LUT，无乘法
 #   i2s  —— 真·零点校正：int8 镜像权重 × uint8 激活 − 128·row_wsum
 BACKENDS: tuple[str, ...] = ("fp32", "int8", "tl", "i2s")
+
+# KV cache 模式（ARCHITECTURE.md §5.4 / TASKS.md C4）。
+KV_MODES: tuple[str, ...] = ("dense", "paged")
+DEFAULT_BLOCK_SIZE = 16
 
 
 def _quant_per_token(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -134,17 +146,30 @@ def _apply_rope(q: np.ndarray, cos: np.ndarray, sin: np.ndarray) -> np.ndarray:
 class PhosModel:
     """加载 .phos 并执行推理的纯 numpy 模型。"""
 
-    def __init__(self, phos: PhosFile, backend: str = "fp32", native: str | None = None) -> None:
+    def __init__(
+        self,
+        phos: PhosFile,
+        backend: str = "fp32",
+        native: str | None = None,
+        kv_mode: str = "paged",
+        block_size: int = DEFAULT_BLOCK_SIZE,
+    ) -> None:
         """构造推理模型。
 
         backend ∈ {"fp32", "int8", "tl", "i2s"}（见模块顶 `BACKENDS`）。
         默认 `fp32`：反量化后做 fp32 矩阵乘，与 torch QAT 前向逐元素等价，
         是不变量 ⑦（engine ↔ torch 相对误差 < 5%）的对照面。
         `tl` / `i2s` 是部署态的整数路径，二者在 int32 域逐位相等。
+
+        kv_mode ∈ {"dense", "paged"}：`paged`（默认，T4-B）用分页 KV 池 +
+        block_tables；`dense` 是全量张量参考实现。二者数值等价（不变量 ⑨）。
         """
         if backend not in BACKENDS:
             raise ValueError(f"未知后端 {backend!r}，可选 {BACKENDS}")
+        if kv_mode not in KV_MODES:
+            raise ValueError(f"未知 kv_mode {kv_mode!r}，可选 {KV_MODES}")
         self.backend = backend
+        self.kv_mode = kv_mode
         self.phos = phos
         h = phos.header
         self.d = int(h["d_model"])
@@ -174,7 +199,24 @@ class PhosModel:
 
         # 预计算 RoPE 表（覆盖最大序列）
         self._cos, self._sin = _build_rope(self.rope_theta, self.d_head, self.max_seq_len + 16)
-        self.cache = _KVCache(self.n_layer, self.n_head, self.d_head)
+        self.block_size = int(block_size)
+        if self.kv_mode == "paged":
+            from .block_manager import BlockManager
+            from .kv_cache import PagedKVCache
+
+            n_blocks = (
+                self.max_seq_len + self.block_size - 1
+            ) // self.block_size + 1  # +1 = null_block
+            self._mgr = BlockManager(
+                n_blocks=n_blocks,
+                block_size=self.block_size,
+                n_seqs=1,
+                max_blocks_per_seq=n_blocks - 1,
+            )
+            self.cache = PagedKVCache(self._mgr, self.n_layer, self.n_kv_head, self.d_head)
+        else:
+            self._mgr = None
+            self.cache = _KVCache(self.n_layer, self.n_head, self.d_head)
 
         # 特殊 token id
         self.bos_id = self.tok.specials.get("<|bos|>") if self.tok else None
@@ -226,8 +268,21 @@ class PhosModel:
 
     # ----------------------------- 工厂 ----------------------------- #
     @classmethod
-    def from_file(cls, path, backend: str = "fp32", native: str | None = None) -> PhosModel:
-        return cls(load_phos(path), backend=backend, native=native)
+    def from_file(
+        cls,
+        path,
+        backend: str = "fp32",
+        native: str | None = None,
+        kv_mode: str = "paged",
+        block_size: int = DEFAULT_BLOCK_SIZE,
+    ) -> PhosModel:
+        return cls(
+            load_phos(path),
+            backend=backend,
+            native=native,
+            kv_mode=kv_mode,
+            block_size=block_size,
+        )
 
     # ----------------------------- 工具 ----------------------------- #
     def _rmsnorm(self, x: np.ndarray, w: np.ndarray) -> np.ndarray:
@@ -322,21 +377,29 @@ class PhosModel:
         """
         tokens = np.asarray(tokens, dtype=np.int64)
         T = int(tokens.shape[0])
-        start = self.cache.len()
+        # 单批超过 max_seq_len：只保留最近 max_seq_len 个 token（标准滑动窗口语义）。
+        # 否则 RoPE 位置会超出预计算表（既存 bug：T > max_seq_len 时越界）。
+        if self.max_seq_len < T:
+            tokens = tokens[T - self.max_seq_len :]
+            T = self.max_seq_len
+        start = self.cache_len()
         # 超过最大长度时做滑动窗口截断（简易 SnapKV 风格）
         if start + T > self.max_seq_len:
             drop = start + T - self.max_seq_len
-            for i in range(self.n_layer):
-                self.cache.k[i] = self.cache.k[i][:, :, drop:, :]
-                self.cache.v[i] = self.cache.v[i][:, :, drop:, :]
-            start = self.cache.len()
+            if self.kv_mode == "paged":
+                self._mgr.drop_tokens(0, drop)
+            else:
+                for i in range(self.n_layer):
+                    self.cache.k[i] = self.cache.k[i][:, :, drop:, :]
+                    self.cache.v[i] = self.cache.v[i][:, :, drop:, :]
+            start = self.cache_len()
 
         x = self.tok_emb[tokens].astype(np.float32)  # [T, d]
         self._hiddens = []
         self._dbg = {}
         cos = self._cos[start : start + T]
         sin = self._sin[start : start + T]
-        Tk = self.cache.len()
+        Tk = self.cache_len()
 
         for i in range(self.n_layer):
             p = f"layers.{i}."
@@ -345,37 +408,46 @@ class PhosModel:
             k = self._proj(h, p + "k_proj")  # [T, dkv]
             v = self._proj(h, p + "v_proj")  # [T, dkv]
 
-            # reshape -> [1, n_head, T, dh]（k/v 经 GQA 重复）
+            # reshape -> [1, n_head, T, dh]；K/V 保持 n_kv_head（paged 省 n_rep 倍内存）
             q = q.reshape(1, T, self.n_head, self.d_head).transpose(0, 2, 1, 3)
             kkv = k.reshape(1, T, self.n_kv_head, self.d_head).transpose(0, 2, 1, 3)
             vkv = v.reshape(1, T, self.n_kv_head, self.d_head).transpose(0, 2, 1, 3)
-            k = np.repeat(kkv, self.n_rep, axis=1)
-            v = np.repeat(vkv, self.n_rep, axis=1)
             if i == 0 and self._dbg is not None:
                 self._dbg["q_raw"] = q.copy()
                 self._dbg["h_norm"] = h.copy()
 
-            # RoPE
+            # RoPE（逐头独立 → 先旋转后展开与 dense 路径逐位相同）
             q = _apply_rope(q, cos, sin)
-            k = _apply_rope(k, cos, sin)
+            kkv = _apply_rope(kkv, cos, sin)
             if i == 0 and self._dbg is not None:
                 self._dbg["q_rope"] = q.copy()
-                self._dbg["k_rope"] = k.copy()
 
-            # 拼接 cache
-            k_full = np.concatenate([self.cache.k[i], k], axis=2)
-            v_full = np.concatenate([self.cache.v[i], v], axis=2)
-            self.cache.k[i] = k_full
-            self.cache.v[i] = v_full
+            if self.kv_mode == "paged":
+                # ---- 分页 KV：预留 -> 逐层写 -> gather + GQA 注意力（不变量 ⑨）----
+                if i == 0 and not self.cache.begin_append(0, T):
+                    raise RuntimeError(
+                        f"分页 KV 容量不足：需要追加 {T} token 但池已满"
+                        f"（max_seq_len={self.max_seq_len}, block_size={self.block_size}）"
+                    )
+                self.cache.write(0, i, kkv[0].transpose(1, 0, 2), vkv[0].transpose(1, 0, 2))
+                out = paged_gqa_attention(q, self.cache, 0, i, self.n_rep, Tk)
+            else:
+                k = np.repeat(kkv, self.n_rep, axis=1)
+                v = np.repeat(vkv, self.n_rep, axis=1)
+                # 拼接 cache
+                k_full = np.concatenate([self.cache.k[i], k], axis=2)
+                v_full = np.concatenate([self.cache.v[i], v], axis=2)
+                self.cache.k[i] = k_full
+                self.cache.v[i] = v_full
 
-            # 注意力
-            scores = (q @ k_full.transpose(0, 1, 3, 2)) / math.sqrt(self.d_head)
-            if T > 1:
-                mask = np.tril(np.ones((T, Tk + T), dtype=bool), k=Tk)
-                scores = np.where(mask[None, None, :, :], scores, -np.inf)
-            attn = np.exp(scores - np.max(scores, axis=-1, keepdims=True))
-            attn = attn / np.sum(attn, axis=-1, keepdims=True)
-            out = attn @ v_full  # [1, H, T, dh]
+                # 注意力
+                scores = (q @ k_full.transpose(0, 1, 3, 2)) / math.sqrt(self.d_head)
+                if T > 1:
+                    mask = np.tril(np.ones((T, Tk + T), dtype=bool), k=Tk)
+                    scores = np.where(mask[None, None, :, :], scores, -np.inf)
+                attn = np.exp(scores - np.max(scores, axis=-1, keepdims=True))
+                attn = attn / np.sum(attn, axis=-1, keepdims=True)
+                out = attn @ v_full  # [1, H, T, dh]
             out = out.transpose(0, 2, 1, 3).reshape(T, self.d)
             if i == 0 and self._dbg is not None:
                 self._dbg["attn_out"] = out.copy()
@@ -397,6 +469,9 @@ class PhosModel:
             x = x + self.w[p + "subln_ffn"].astype(np.float32) * ffn
             self._hiddens.append(x.astype(np.float32).copy())
 
+        if self.kv_mode == "paged":
+            self.cache.end_append(0)
+
         x = x * self.norm_final
         emb = self.tok_emb if self.tied else self.lm_head
         logits = x @ emb.T  # [T, V]
@@ -405,6 +480,10 @@ class PhosModel:
         return logits.astype(np.float32)
 
     # ----------------------------- 生成 ----------------------------- #
+    def cache_len(self) -> int:
+        """当前 KV cache 中的 token 数（dense 与 paged 统一接口）。"""
+        return self.cache.mgr.seq_len(0) if self.kv_mode == "paged" else self.cache.len()
+
     def reset(self) -> None:
         self.cache.reset()
 

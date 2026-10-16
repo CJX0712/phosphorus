@@ -121,7 +121,57 @@ python -m scripts.bench_kernels --reps 5
 python -m scripts.bench_native --model ckpt/tiny.phos --reps 7
 ```
 
-## 5. 生成样本（实测输出）
+## 5. T4-B：分页 KV（paged）vs dense（实测）
+
+T4-B 把 KV cache 从「每层一份 `[1, n_head, T, d_head]` 全量张量」换成
+**分页物理池 + block_tables**（vLLM 语义）：只存 `n_kv_head` 份 KV，读取时
+GQA 展开；逻辑→物理间接层为 T4-C 驱逐 / T4-D 连续批处理奠基。
+两种模式数值等价（不变量 ⑨，`tests/test_engine_paged.py` 7 条断言）。
+
+### 5.1 吞吐（`ckpt/tiny.phos`，prefill 32 tok + decode 64 tok，best-of-3）
+
+| kv_mode | 数学后端 | prefill tok/s | decode tok/s | prefill 比 | decode 比 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| dense | fp32 | 3,917 | 254 | 1.00x | 1.00x |
+| paged | fp32 | 4,294 | 275 | 1.10x | 1.08x |
+| dense | tl | 1,085 | 352 | 1.00x | 1.00x |
+| paged | tl | 1,410 | 369 | **1.30x** | 1.05x |
+| dense | i2s | 1,691 | 374 | 1.00x | 1.00x |
+| paged | i2s | 1,664 | 328 | 0.98x | 0.88x |
+
+**如实说明**：在 1.78M / max_seq_len=256 的玩具模型上，paged 的收益是
+**结构性**的而非压倒性的——tl 的 prefill 1.30× 来自注意力只算 `n_kv_head`
+（tiny 为 3:1 GQA，理论 3×，实测受投影主导故 1.30×）；i2s decode 的 0.88×
+是 gather + repeat 的固定开销在 T=1 时未被摊销（dense 路径此时只是数组拼接）。
+paged 的真正价值在**更大模型 / 更长上下文**（内存从 `n_head` 降到 `n_kv_head`、
+块级共享与驱逐、连续批处理），这些收益要在 T4-C / T4-D 才能量化。
+本机为共享开发机，单轮 best-of-N 波动可达 ±20%。
+
+### 5.2 块管理器验收（C4）
+
+| 检查 | 结果 |
+|---|---|
+| 分配/回收 10,000 次无泄漏 | ✅ `utilization()` 精确回到 0.0，`Σref_cnt == 0` |
+| 容量约束（块数 + 每序块表双上限） | ✅ 超限返回 False 且不改状态 |
+| 引用计数共享（`touch` + `release_block`） | ✅ 共享块不会被单条序列提前回收 |
+| 滑动窗口任意数量丢弃 | ✅ `head_offset` 机制，逻辑→物理映射永不错位 |
+| `paged_gqa_attention` vs dense | ✅ 最大绝对差 < 1e-5（含朴素逐元素参考三方比对） |
+| 分块 prefill == 整段 prefill | ✅ 4+4+16 与一次 24 token logits 一致 |
+| 块大小 4/16/32/64 | ✅ 四种块大小结果互相一致 |
+| `reset()` 归还 | ✅ 利用率归零 |
+
+### 5.3 复现命令
+
+```bash
+# 两种 KV 模式对比（任意数学后端）
+python -m phosphorus bench --model ckpt/tiny.phos --backend tl --kv paged --tokens 64
+python -m phosphorus bench --model ckpt/tiny.phos --backend tl --kv dense --tokens 64
+
+# 引擎级等价性测试（dense ↔ paged，7 条断言）
+python -m pytest tests/test_engine_paged.py tests/test_paged_kv.py -q
+```
+
+## 6. 生成样本（实测输出）
 
  prompt `"To be, or not to be"`，采样 160 tokens，temperature 默认：
 
@@ -140,17 +190,18 @@ Than give you thy shall the to
 古英语用词（`thou`/`canst`/`hath`/`thy`）与标点节奏。词法尚松散，
 属预期内——参数量与步数决定的容量上限。
 
-## 6. 质量门（实测）
+## 7. 质量门（实测）
 
 | 检查 | 结果 |
 |---|---|
-| pytest | **98/98 通过**（含 50 条 native 内核测试） |
+| pytest | **127/127 通过**（含 50 条 native 内核 + 27 条分页 KV/引擎等价测试） |
 | ruff check / format | 干净 |
-| native vs numpy 位一致性 | int32 与 fp32 域均逐位相等（不变量 ①） |
+| native vs numpy 位一致性 | int32 与 fp32 域均逐位相等（不变量 ① / ⑧） |
+| paged vs dense 引擎级一致性 | logits 最大差 < 1e-4、argmax 完全一致（不变量 ⑨） |
 | engine↔torch logits 相对误差 | < 5%（不变量 ⑦，忠实路径） |
 | int8 激活路径 | 有限且与忠实路径 cos > 0.9 |
 
-## 7. 复现命令
+## 8. 复现命令
 
 ```bash
 # 训练（约 24 min，本机；数据准备已缓存则约 15s）
@@ -168,6 +219,10 @@ python -m pytest -q
 # T4-A 基准（native 内核 vs numpy）
 python -m scripts.bench_kernels --reps 5
 python -m scripts.bench_native --model ckpt/tiny.phos --reps 7
+
+# T4-B 基准（分页 KV vs dense）
+python -m phosphorus bench --model ckpt/tiny.phos --backend tl --kv paged --tokens 64
+python -m phosphorus bench --model ckpt/tiny.phos --backend tl --kv dense --tokens 64
 ```
 
 > 注：默认配置（9.4M 模型）面向多核服务器调参；在上述开发机上单步约 4 分钟，

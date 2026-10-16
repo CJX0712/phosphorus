@@ -59,7 +59,7 @@ python -m scripts.bench_native --model ckpt/tiny.phos --reps 7
 
 ```
 phosphorus/
-├── phosphorus/         扁平包（T1–T3 已落地，T4-A 原生内核已落地）
+├── phosphorus/         扁平包（T1–T3 已落地，T4-A/B 原生内核 + 分页 KV 已落地）
 │   ├── tokenizer.py    BPE（Sennrich 2016）+ 字节级映射，CJK/emoji 无损往返
 │   ├── data.py         语料加载（离线兜底）+ memmap token 数据集
 │   ├── model.py        LLaMA 变体：Pre-RMSNorm / RoPE / GQA / ReLU² / SubLN + 三值 QAT + HGF
@@ -68,8 +68,11 @@ phosphorus/
 │   ├── gemm.py         GEMM 后端：TL(LUT) / I2_S / int32 参考
 │   ├── export.py       .phos 字节级导出
 │   ├── loader.py       .phos 加载（运行时零 torch）
-│   ├── engine.py       推理引擎：NumPy + native 自适应调度（_use_native）
+│   ├── engine.py       推理引擎：NumPy + native 自适应调度 + 分页 KV（--kv dense|paged）
 │   ├── backend.py      实现后端注册：native / numpy（auto 降级）
+│   ├── block_manager.py 分页块管理：block_tables / 引用计数 / 滑动窗口（vLLM 语义）
+│   ├── kv_cache.py     分页 KV 物理池 + begin/write/gather 三段式协议
+│   ├── attention.py    GQA 注意力：paged / dense 同一数学核心
 │   ├── csrc/           C99 原生内核源码（随 wheel 分发）
 │   │   ├── phos.h      ABI（version 1，scalar/AVX2 flags）
 │   │   ├── phos_gemm.c TL / I2_S GEMM（maddubs+madd，移植自 BitNet.cpp MIT）
@@ -88,7 +91,7 @@ phosphorus/
 
 | 文档 | 内容 |
 |---|---|
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 总体架构、`.phos` 字节级格式、内核算法、8 条核心不变量 |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 总体架构、`.phos` 字节级格式、内核算法、10 条核心不变量 |
 | [`docs/TASKS.md`](docs/TASKS.md) | T1–T5 任务分解与验收标准 |
 | [`docs/ALGORITHMS.md`](docs/ALGORITHMS.md) | A-1…A-25 算法溯源（来源 / 选型理由 / 我们的超越点 / 许可证） |
 | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | 全部实测数字（禁止写入未测量值） |

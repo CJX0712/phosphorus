@@ -52,10 +52,11 @@
 | `quantize/{packing,export}` | `phosphorus/packing.py` / `phosphorus/export.py` | ✅ T3（不变量①③） |
 | `kernels/numpy_backend/gemm` | `phosphorus/gemm.py` | ✅ T3（不变量①） |
 | `engine/model_loader` | `phosphorus/loader.py` | ✅ T3 |
-| `engine`（推理主循环） | `phosphorus/engine.py` | ✅ T3（不变量⑦）+ T4-A 自适应 native 调度 |
+| `engine`（推理主循环） | `phosphorus/engine.py` | ✅ T3（不变量⑦）+ T4-A 自适应 native 调度 + T4-B 分页 KV |
+| 分页 KV / 块管理 / GQA 注意力 | `phosphorus/kv_cache.py`, `block_manager.py`, `attention.py` | ✅ T4-B（不变量⑨⑩） |
 | `kernels/native/*` | `phosphorus/csrc/*.{c,h}` + `phosphorus/native/*` | ✅ T4-A（zig cc 编译，位精确） |
 | 实现后端注册 | `phosphorus/backend.py` | ✅ T4-A |
-| `speculate/*` / `bench/*` / `convert/*` | 未实现（基准脚本 `scripts/bench_*.py` 已随 T4-A 落地） | 🔜 T4-B~E / T5 规划中 |
+| `speculate/*` / `bench/*` / `convert/*` | 未实现（基准脚本 `scripts/bench_*.py` 已随 T4-A 落地） | 🔜 T4-C~E / T5 规划中 |
 
 ---
 
@@ -199,8 +200,11 @@ phosphorus/
 │   ├── packing.py                     # 三值 5-bit pack/unpack（合并自 quantize/packing）
 │   ├── gemm.py                        # TL / I2_S / int32 参考（合并自 kernels/numpy_backend/gemm）
 │   ├── loader.py                      # .phos 加载（合并自 engine/model_loader）
-│   ├── engine.py                      # 推理引擎（numpy + native 自适应调度）
+│   ├── engine.py                      # 推理引擎（numpy + native 自适应调度 + 分页 KV）
 │   ├── backend.py                     # 实现后端注册：native / numpy（T4-A）
+│   ├── block_manager.py               # 分页块管理：block_tables / 引用计数 / 滑动窗口（T4-B）
+│   ├── kv_cache.py                    # 分页 KV 物理池 [n_blocks, n_layer, 2, bs, n_kv, dh]（T4-B）
+│   ├── attention.py                   # GQA 注意力：paged / dense 同一数学核心（T4-B）
 │   ├── sampling.py                    # top-k / top-p / temp
 │   ├── csrc/                          # 原生 C99 源码（随 wheel 分发）
 │   │   ├── phos.h                     # 原生内核 ABI 头（ABI version 1）
@@ -223,6 +227,8 @@ phosphorus/
 │   ├── test_hgf.py                    # HGF 低秩校正往返
 │   ├── test_rope.py                   # 不变量 ④
 │   ├── test_no_torch.py               # 推理路径零 torch 导入
+│   ├── test_paged_kv.py               # T4-B：块管理 / 物理池 / 注意力对齐（20 条）
+│   ├── test_engine_paged.py           # T4-B：引擎级 paged ↔ dense 等价（7 条）
 │   └── test_native_backend.py         # T4-A：native 内核 50 条断言（L0–L6）
 ├── data/raw/
 │   └── tinyshakespeare.txt            # 离线兜底语料（随仓库提交，1.1 MB）
@@ -247,10 +253,13 @@ phosphorus/
 | `phosphorus/packing.py` | 三值 5-bit pack/unpack（24 权重 → 5 字节，14 项 LUT） | `pack_ternary_v1`, `unpack_ternary_v1` | ✅ T3（不变量③） |
 | `phosphorus/gemm.py` | TL / I2_S / int32 参考 GEMM（位精确） | `gemm_tl`, `gemm_i2s`, `int32_reference` | ✅ T3（不变量①） |
 | `phosphorus/loader.py` | `.phos` 加载 → 运行时权重 + HGF + tokenizer | `load_phos`, `PhosFile` | ✅ T3 |
-| `phosphorus/engine.py` | 纯 numpy 推理引擎（KV cache / prefill-decode / 采样 / RoPE） | `PhosModel`, `_KVCache` | ✅ T3（不变量⑦） |
+| `phosphorus/engine.py` | 推理引擎：prefill-decode / 采样 / RoPE / native 自适应调度 / 分页 KV | `PhosModel`, `_KVCache`, `PagedKVCache`, `paged_gqa_attention` | ✅ T3（不变量⑦）+ T4-A + T4-B（不变量⑨） |
+| `phosphorus/block_manager.py` | 分页块管理（vLLM 语义）：block_tables / 引用计数 / 滑动窗口 / 使用率 | `BlockManager` | ✅ T4-B（不变量⑩） |
+| `phosphorus/kv_cache.py` | 分页 KV 物理池 `[n_blocks, n_layer, 2, bs, n_kv, dh]` + begin/write/gather 协议 | `PagedKVCache` | ✅ T4-B |
+| `phosphorus/attention.py` | GQA 注意力：paged 与 dense 共用同一数学核心 | `gqa_attention`, `paged_gqa_attention` | ✅ T4-B（不变量⑨） |
 | `phosphorus/sampling.py` | temperature / top-k / top-p 采样 | `sample` | ✅ T3 |
-| `phosphorus/cli.py` | 子命令分发：`train / export / generate / bench / tokenize` | `build_parser`, `main` | ✅ T1 |
-| `csrc/phos.h` | 原生 C99 内核 ABI 头（TL GEMM / RMSNorm / softmax / RoPE / pack） | `phos_tl_gemm_f32` 等 | 🔜 T4 规划中 |
+| `phosphorus/cli.py` | 子命令分发：`train / export / generate / bench / tokenize`（`--kv`/`--backend`） | `build_parser`, `main` | ✅ T1 + T4-B |
+| `phosphorus/csrc/phos.h` | 原生 C99 内核 ABI 头（TL GEMM / RMSNorm / softmax / RoPE / pack） | `phos_tl_gemm_f32` 等 | ✅ T4-A（随 wheel 分发） |
 | `speculate/*` | O1 自草稿 / O2 控制器 / 树 / Leviathan 验证 | — | 🔜 T5 规划中 |
 | `bench/*` | 基准矩阵 / Pareto 曲线 | — | 🔜 T5 规划中 |
 | `convert/*` | HF 导入/导出 | — | 🔜 T5 规划中 |
@@ -772,6 +781,38 @@ Windows 下加载中的 DLL 不可覆盖，故原子 rename（`.tmp<pid>` → �
 **并行**（`phosphorus/native/parallel.py`）：仅按 N 维切行块（`PHOS_THREADS` 环境变量，
 默认 `min(8, cpu)`），行块结果与整块调用逐位相等（L5 断言）——因为累加顺序不变。
 
+### 5.5 分页 KV（T4-B）
+
+**两种模式**（`PhosModel(kv_mode=...)`，CLI `--kv`）：
+
+| 模式 | 存储 | 适用 |
+|---|---|---|
+| `dense` | 每层一份 `[1, n_head, T, d_head]`（GQA 已展开） | 参考实现 / 对照测试 |
+| `paged`（默认） | 物理池 `kv[n_blocks, n_layer, 2, block_size, n_kv_head, d_head]` + `block_tables[s, j]` | 生产路径；为驱逐 / 连续批处理奠基 |
+
+**块层语义移植自 vLLM v1 `BlockPool`**（Apache-2.0，见 `NOTICE`）：
+引用计数（仅 `ref_cnt` 归零才回空闲队列）、非缓存块 LIFO 复用、`null_block`
+占位（block_id=0，不参与分配与计数）、空闲队列摘/还。**未移植**：GPU 张量、
+前缀缓存哈希（`enable_caching=False`）、跨设备 swap。
+
+**滑动窗口**（T4-C 之前的简易驱逐）：每条序列记 `head_offset` = 首块内已废弃
+slot 数，逻辑位置 p 的存储位置是 `head_offset + p`；丢弃任意数量 token 都只在
+`head_offset` 累加满一块时回收整块——**逻辑→物理映射永不错位**，被丢块的 KV
+数据无需搬运。
+
+**写入协议**（三段式，避免预留与写入的位置歧义）：
+`begin_append(seq, T)` 预留块 → 逐层 `write(seq, layer, k, v)` → `end_append(seq)`；
+单层便利封装 `append()`。容量预检 `can_append()`，超限时 `begin_append` 返回
+False（引擎随即报错，因为池按 `max_seq_len` 精确 sizing）。
+
+**数值等价**：paged 只存 `n_kv_head` 份、读取时 `np.repeat` 展开，与 dense 的
+「先展开后计算」逐元素相同（repeat 是精确拷贝）；注意力数学核心只有一份
+（`attention.gqa_attention`），故差异只可能来自浮点累加顺序——实测引擎级
+logits 最大差 < 1e-4、argmax 100% 一致（不变量 ⑨）。
+
+**块大小**：默认 16（vLLM 默认值，适配小模型）；实测 4/16/32/64 结果一致，
+块越大 gather 的间接寻址开销越低、但滑动窗口的粒度越粗。
+
 ---
 
 ## 6. 自适应投机控制器（O2）
@@ -855,6 +896,8 @@ stateDiagram-v2
 | ⑥ | QAT STE 梯度 == 数值梯度 | `test_qat_ste.py` | 前向量化点的反向梯度与 `finite_diff(·, h=1e-3)` 相对误差 < 5% |
 | ⑦ | KV 驱逐后注意力输出可控误差界 | `test_kv_eviction.py` | 50% 预算下，逐层注意力输出相对 L2 误差 < 10%，且 PPL 退化 < 10% |
 | ⑧ | native 与 numpy 实现在 int32/fp32 域**逐位相等**（T4-A） | `test_native_backend.py` | L0：`native.tl_i32 == native.i2s_i32 == int32_reference`；L2：fp32 输出与 float64 参考逐位相等；L5：行块切分 == 整块 |
+| ⑨ | 分页（paged）KV 与 dense 参考**数值一致**（T4-B） | `test_paged_kv.py` / `test_engine_paged.py` | 内核级最大绝对差 < 1e-5（三方比对含朴素逐元素实现）；引擎级 logits 最大差 < 1e-4 且 argmax 100% 一致；分块 prefill == 整段 prefill |
+| ⑩ | 块管理器分配/回收**无泄漏**（T4-B） | `test_paged_kv.py` | 10,000 次随机分配/回收后 `utilization()` 精确回 0、`Σref_cnt == 0`；容量超限返回 False 且不改状态 |
 
 ---
 

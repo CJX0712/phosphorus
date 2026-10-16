@@ -104,7 +104,9 @@ def cmd_generate(a: argparse.Namespace) -> None:
     from .engine import PhosModel
 
     cfg = build_config_from_args(a)
-    model = PhosModel.from_file(a.model, backend=getattr(a, "backend", "fp32"))
+    model = PhosModel.from_file(
+        a.model, backend=getattr(a, "backend", "fp32"), kv_mode=getattr(a, "kv", "paged")
+    )
     t0 = time.time()
     text = model.generate(
         a.prompt,
@@ -126,7 +128,9 @@ def cmd_bench(a: argparse.Namespace) -> None:
 
     from .engine import PhosModel
 
-    model = PhosModel.from_file(a.model, backend=getattr(a, "backend", "fp32"))
+    model = PhosModel.from_file(
+        a.model, backend=getattr(a, "backend", "fp32"), kv_mode=getattr(a, "kv", "paged")
+    )
     n = a.tokens
     # 特殊 token（如 <|bos|>）id 可能 >= vocab，嵌入表无对应行；回退到 id 0 做吞吐基准。
     start = model.bos_id if (model.bos_id is not None and 0 <= model.bos_id < model.vocab) else 0
@@ -224,6 +228,9 @@ def build_parser() -> argparse.ArgumentParser:
     pg.add_argument("--prompt", default="")
     pg.add_argument("--config", default=None)
     pg.add_argument("--backend", default="fp32", choices=["fp32", "int8", "tl", "i2s"])
+    pg.add_argument(
+        "--kv", default="paged", choices=["dense", "paged"], help="KV cache 模式（T4-B）"
+    )
     pg.add_argument("--max_new_tokens", type=int, default=None)
     pg.add_argument("--temperature", type=float, default=None)
     pg.add_argument("--top_k", type=int, default=None)
@@ -237,6 +244,9 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--tokens", type=int, default=64)
     pb.add_argument("--prompt-len", type=int, default=8)
     pb.add_argument("--backend", default="fp32", choices=["fp32", "int8", "tl", "i2s"])
+    pb.add_argument(
+        "--kv", default="paged", choices=["dense", "paged"], help="KV cache 模式（T4-B）"
+    )
     pb.set_defaults(func=cmd_bench)
 
     pk = sub.add_parser("tokenize", help="分词器训练 / 编解码")
