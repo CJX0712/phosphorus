@@ -260,6 +260,16 @@ def cmd_tokenize(a: argparse.Namespace) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def cmd_convert(a: argparse.Namespace) -> None:
+    """导出 .phos 为 HuggingFace 格式（T5-C8）。"""
+    from .convert import hf_export
+
+    out = hf_export.export_to_hf(a.model, a.out, dtype=getattr(a, "dtype", "fp16"))
+    print(f"[ok] HuggingFace 模型 -> {out} (config.json + pytorch_model.bin)")
+    print("[note] 标准 LlamaForCausalLM 省略 BitNet SubLN，属架构近似等价；"
+          "逐位保真请用 Phosphorus 原生引擎。")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="phosphorus", description="Phosphorus：三值原生 LLM 训练与推理"
@@ -390,6 +400,12 @@ def build_parser() -> argparse.ArgumentParser:
     pk.add_argument("--out", default="tokenizer.json")
     pk.add_argument("--vocab", type=int, default=8192)
     pk.set_defaults(func=cmd_tokenize)
+
+    pc = sub.add_parser("convert", help="导出 .phos 为 HuggingFace 格式（T5-C8）")
+    pc.add_argument("--model", required=True, help="输入 .phos 路径")
+    pc.add_argument("--out", required=True, help="输出 HF 模型目录")
+    pc.add_argument("--dtype", default="fp16", choices=["fp16", "fp32"])
+    pc.set_defaults(func=cmd_convert)
 
     return p
 

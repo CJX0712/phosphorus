@@ -83,6 +83,24 @@ python -m phosphorus generate --model ckpt/tiny.phos \
 > [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) §5.6，算法与超越点见
 > [`docs/ALGORITHMS.md`](docs/ALGORITHMS.md) A-12/A-15。
 
+### 导出到 Hugging Face（T5-C8）
+
+把 `.phos` 转换为 `transformers` 可 `from_pretrained` 的目录（标准 `LlamaForCausalLM` 权重）：
+
+```bash
+python -m phosphorus convert --model ckpt/tiny.phos --out hf_model --dtype fp16
+# 产出 hf_model/{config.json, pytorch_model.bin, vocab.json, merges.txt, tokenizer_config.json}
+# 需在装有 transformers 的环境加载：
+# from transformers import LlamaForCausalLM
+# m = LlamaForCausalLM.from_pretrained("hf_model")
+```
+
+> **已知限制（诚实标注）**：标准 `LlamaForCausalLM` 不含 BitNet 的 SubLN 子层，
+> 导出会**省略 SubLN**，故 HF 模型是**架构近似等价**（权重级忠实、前向图不完全一致）；
+> 引擎激活为 ReLU²、HF 标准 Llama 用 `relu`，亦有轻微数值差异。逐位保真请使用
+> Phosphorus 原生引擎（`phosphorus generate`）。详见
+> [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) §6.2。
+
 ---
 
 ## 仓库结构（节选）

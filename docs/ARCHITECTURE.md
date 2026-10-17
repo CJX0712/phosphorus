@@ -215,6 +215,7 @@ phosphorus/
 │   ├── packing.py                     # 三值 5-bit pack/unpack（合并自 quantize/packing）
 │   ├── gemm.py                        # TL / I2_S / int32 参考（合并自 kernels/numpy_backend/gemm）
 │   ├── loader.py                      # .phos 加载（合并自 engine/model_loader）
+│   ├── convert/                       # T5-C8 HF 导出：hf_export.py（.phos → LlamaForCausalLM 权重）
 │   ├── engine.py                      # 推理引擎（numpy + native 自适应调度 + 分页 KV）
 │   ├── backend.py                     # 实现后端注册：native / numpy（T4-A）
 │   ├── block_manager.py               # 分页块管理：block_tables / 引用计数 / 滑动窗口（T4-B）

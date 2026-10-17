@@ -496,6 +496,41 @@ native（`--backend tl`）两条路径下均产出**莎士比亚式连贯文本*
 > 由 `native/` 构建注入），无独立 `native` 枚举值——这是后端注册表（A-? `backend.py`）
 > 的命名，与 README §原生 C99 内核 描述一致。
 
+### 6.2 T5-C8：HuggingFace 格式导出（实测）
+
+`phosphorus convert --model ckpt/tiny.phos --out hf_model` 把 `.phos` 导出为
+`transformers` 可加载的 `config.json` + `pytorch_model.bin`（fp16）。
+
+**机制**：三值权重解包（int8 ∈ {-1,0,1}）+ 逐通道 absmean scale 还原；HGF 低秩校正因
+矩阵结合律 `B@(A@x) == (B@A)@x` 静态折叠进权重 `W_full = (W_hat·scale) + gate·(α/r)·(B@A)`；
+权重键名从 Phosphorus 命名映射到 HF `LlamaForCausalLM`（`tok_emb→embed_tokens`、
+`attn_norm→input_layernorm`、`q/k/v/o/gate/up/down→self_attn/mlp.*` 等）。
+
+**实测产物**（`ckpt/tiny.phos`，d=192/3 层）：`config.json`（hidden_size=192,
+num_hidden_layers=3, vocab=4096, tie_word_embeddings=true）+ `pytorch_model.bin`（3.5 MB）
++ 分词器 `vocab.json`/`merges.txt`/`tokenizer_config.json`。
+
+**验证**：`tests/test_hf_export.py` 4 项——键名映射、config/bin 结构、解量化公式一致性
+（导出权重 vs 手动还原，fp16 容差）、`transformers.from_pretrained` 前向（该用例
+`importorskip("transformers")`，本机未装则跳过）。本仓库全量 pytest 通过。
+
+**诚实限制（已知、非缺陷）**：
+1. 标准 `LlamaForCausalLM` **不含 BitNet 的 SubLN 子层**（attn/ffn 后的子层归一化，
+   数据相关、不可折叠进静态权重）→ 导出**省略 SubLN**，HF 模型为**架构近似等价**
+   （权重级忠实，前向计算图与 Phosphorus 引擎不完全一致）。需逐位保真请用原生引擎。
+2. 引擎激活为 BitNet ReLU²，HF 标准 Llama 用 `relu`，存在轻微数值差异。
+3. 综上，HF 导出是「可加载、可运行的近似参考实现」，非逐位副本——这正是三值 1.58-bit
+   模型无法直接塞进标准 HF 权重的固有限制，已在 CLI 输出与本文同步标注。
+
+**复现**：
+
+```bash
+python -m phosphorus convert --model ckpt/tiny.phos --out hf_model --dtype fp16
+# 需 transformers 环境：
+# from transformers import LlamaForCausalLM
+# m = LlamaForCausalLM.from_pretrained("hf_model"); m(torch.tensor([[1,2,3]]))
+```
+
 ## 7. 质量门（实测）
 
 | 检查 | 结果 |
