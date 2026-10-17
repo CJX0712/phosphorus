@@ -335,10 +335,16 @@ def cmd_convert(a: argparse.Namespace) -> None:
         faithful=getattr(a, "faithful", False),
     )
     print(f"[ok] HuggingFace 模型 -> {out} (config.json + pytorch_model.bin)")
-    print(
-        "[note] 标准 LlamaForCausalLM 省略 BitNet SubLN，属架构近似等价；"
-        "逐位保真请用 Phosphorus 原生引擎。"
-    )
+    if getattr(a, "faithful", False):
+        print(
+            "[note] 忠实模式已导出自定义 PhosphorusForCausalLM（含 SubLN 增益 + ReLU²，"
+            "目录自带 modeling_phosphorus.py）；加载需 trust_remote_code=True。"
+        )
+    else:
+        print(
+            "[note] 标准 LlamaForCausalLM 省略 BitNet SubLN，属架构近似等价；"
+            "逐位保真请加 --faithful 或用 Phosphorus 原生引擎。"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
