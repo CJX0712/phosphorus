@@ -121,6 +121,16 @@ class _KVCache:
             self.k[i] = self.k[i][:, :, :0, :]
             self.v[i] = self.v[i][:, :, :0, :]
 
+    def truncate_tail(self, n: int) -> int:
+        """丢弃末尾 n 个 token（dense 参考实现；投机解码 reject 回滚用）。"""
+        n = int(min(n, self.k[0].shape[2]))
+        if n <= 0:
+            return 0
+        for i in range(self.n_layer):
+            self.k[i] = self.k[i][:, :, : self.k[i].shape[2] - n, :]
+            self.v[i] = self.v[i][:, :, : self.v[i].shape[2] - n, :]
+        return n
+
     def len(self) -> int:
         return int(self.k[0].shape[2])
 
@@ -228,12 +238,15 @@ class PhosModel:
             # 物理池按「序列数 × 每序列块数」分配（每条序列独立占用至多
             # blocks_per_seq 个块，互不共享——连续批处理 T4-D 的前提）。
             blocks_per_seq = (self.max_seq_len + self.block_size - 1) // self.block_size
-            n_blocks = self.max_seqs * blocks_per_seq + 1  # +1 = null_block
+            # 滑动窗口瞬态预留（+1）：head_offset 尚未跨块回收时，物理跨度
+            # head_offset + seq_len 可达 max_seq_len + block_size - 1，
+            # 需要 1 个备用块才能无缝换入新尾块（vLLM 滑窗同款预留）。
+            n_blocks = self.max_seqs * (blocks_per_seq + 1) + 1  # +1 = null_block
             self._mgr = BlockManager(
                 n_blocks=n_blocks,
                 block_size=self.block_size,
                 n_seqs=self.max_seqs,
-                max_blocks_per_seq=blocks_per_seq,
+                max_blocks_per_seq=blocks_per_seq + 1,
             )
             self.cache = PagedKVCache(
                 self._mgr,
@@ -441,10 +454,14 @@ class PhosModel:
         return y
 
     # ----------------------------- 前向 ----------------------------- #
-    def forward(self, tokens: np.ndarray, return_hidden: bool = False):
+    def forward(
+        self, tokens: np.ndarray, return_hidden: bool = False, stop_at_layer: int | None = None
+    ):
         """对 [T] token 做一次前向，更新 KV cache，返回 [T, V] logits。
 
         return_hidden=True 时额外返回各层残差流 hidden（debug 用），便于与 torch 对齐。
+        stop_at_layer: 仅前向到第 `stop_at_layer` 层即截断并返回 logits（供 O1 自草稿
+            早退使用；KV 只写入前 `stop_at_layer` 层，且**不触发 KV 驱逐**）。
         """
         tokens = np.asarray(tokens, dtype=np.int64)
         T = int(tokens.shape[0])
@@ -476,7 +493,8 @@ class PhosModel:
         cos, sin = self._rope_slice(abs_start, T)
         Tk = self.cache_len()
 
-        for i in range(self.n_layer):
+        n_layers_run = self.n_layer if stop_at_layer is None else int(stop_at_layer)
+        for i in range(n_layers_run):
             p = f"layers.{i}."
             h = self._rmsnorm(x, self.w[p + "attn_norm"])
             q = self._proj(h, p + "q_proj")  # [T, d]
@@ -553,7 +571,12 @@ class PhosModel:
         if self.kv_mode == "paged":
             self.cache.end_append(0)
             # T4-C：达到高水位则按策略压缩 KV（逐层预算 + 逐层保留掩码）
-            if self._evict is not None and self.cache_len() > self._evict_threshold:
+            # 自草稿早退（stop_at_layer）路径不触发驱逐，避免 KV 长度与层循环不一致。
+            if (
+                stop_at_layer is None
+                and self._evict is not None
+                and self.cache_len() > self._evict_threshold
+            ):
                 self._run_eviction()
 
         x = x * self.norm_final
@@ -807,6 +830,39 @@ class PhosModel:
 
     def reset(self) -> None:
         self.cache.reset()
+        self._abs_dropped = 0
+
+    def truncate_tail(self, seq_id: int = 0, n: int = 1) -> int:
+        """逐序列丢弃 KV cache 末尾 n 个 token（投机解码 reject 回滚）。
+
+        仅 paged 模式严格支持；dense 模式亦提供等价语义。要求 eviction == "none"
+        （逐层长度一致），否则逐层预算会被整体收缩。返回实际丢弃数。
+        """
+        if self.kv_mode == "paged":
+            return int(self.cache.truncate_tail(seq_id, n))
+        # dense
+        return int(self.cache.truncate_tail(n))
+
+    def shadow(self) -> PhosModel:
+        """克隆一个**共享权重、独立 KV cache** 的镜像模型（投机解码草稿器专用）。
+
+        复用同一 `phos`（权重/分词器按引用共享，零拷贝）；仅 cache 与惰性解包状态
+        独立。草稿器借此拥有自己的 KV 序列，与目标模型互不污染，从而支持「热 KV
+        增量解码 + 拒绝回滚」（TASKS.md C3）。驱逐强制为 "none"——投机解码要求
+        逐层长度一致以保证回滚正确。
+        """
+        return PhosModel(
+            self.phos,
+            backend=self.backend,
+            native=None,
+            kv_mode=self.kv_mode,
+            block_size=self.block_size,
+            eviction="none",
+            kv_budget=self.kv_budget,
+            window_size=32,
+            sink_size=4,
+            max_seqs=self.max_seqs,
+        )
 
     def generate(
         self,
@@ -817,10 +873,13 @@ class PhosModel:
         top_p: float = 0.95,
         seed: int = 0,
         stream: bool = False,
+        speculate: str = "off",
+        draft_layers: int | None = None,
+        K: int = 4,
+        controller: object | None = None,
     ) -> str:
         if self.tok is None:
             raise RuntimeError("该 .phos 不含 tokenizer，无法做文本生成（请用 token id 接口）")
-        rng = np.random.default_rng(seed)
         ctx = self.tok.encode(prompt)
         if not ctx:
             # 特殊 token（如 <|bos|>）的 id 可能 >= vocab（词表外），嵌入表无对应行；
@@ -830,6 +889,34 @@ class PhosModel:
                 if (self.bos_id is not None and 0 <= self.bos_id < self.vocab)
                 else [0]
             )
+
+        mode = str(speculate).lower()
+        if mode not in ("off", "none") and self.n_layer >= 2:
+            # O1 自草稿投机解码：复用同一份权重做 early-exit 草稿
+            from . import speculate as _spec
+
+            drafter = _spec.LayerSkipDrafter(self, draft_layers=draft_layers)
+            # 草稿器独占一条热 KV cache（shadow 共享权重、零额外字节，O1 硬约束）
+            draft_model = self.shadow()
+            gen_ids, _alpha, _info = _spec.generate_tokens(
+                self,
+                ctx,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                seed=seed,
+                drafter=drafter,
+                K=K,
+                controller=controller,
+                stream=stream,
+                tok=self.tok,
+                draft_model=draft_model,
+            )
+            return self.tok.decode(ctx + gen_ids)
+
+        # 回退：逐 token 串行自回归（无投机）
+        rng = np.random.default_rng(seed)
         self.reset()
         logits = self.forward(np.array(ctx, dtype=np.int64))
         next_id = _sample(logits[-1], temperature, top_k, top_p, rng)

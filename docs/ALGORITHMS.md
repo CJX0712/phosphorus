@@ -213,9 +213,11 @@
   - **朴素贪心接受**（`argmax(p_target) == t_i` 才接受）—— 会偏移分布。
   - **典型/截断变体**（为加速放宽接受条件）—— 破坏等价性。
 - **我们的超越**：**纯沿用，理由：正确性是本项目不可交易的底线。** 唯一的工程增强是**批量树状验证**（一次 prefill 验证整棵树的所有节点，而非逐个串行），这不改变数学语义，只改变计算组织方式。
-- **落地**：`speculate/verify.py::speculative_verify`；测试 `tests/test_speculative_distribution.py`（χ² 检验，100k token，p > 0.05）
-- **实测数字**：`[骨架]` — 待 T5/C1：`χ² p = __`；`经验 KL = __`；`greedy 逐位一致 = __`
-- **状态**：`[骨架]`
+- **落地**：`speculate/verify.py::spec_verify`（随机模式 + 贪心模式）；测试 `tests/test_speculative_distribution.py`
+- **实测数字**（tiny.phos）：canonical（temp=0.8/top_p=0.95，10 条 prompt 池化）+ 高温非退化配置（temp=1.5/top_p=1.0，3 组独立种子）χ² 齐性检验均**未拒绝**等价假设（χ²/df ≈ 1.02，零假设期望 1.0）；`temperature=0` 贪心投机与串行**逐位一致** ✅
+- **方法论修正（曾致"静默跳过/假通过"）**：① 验证须用 `sampling.sampling_probs`（截断后真实采样分布）；② 单 prompt 下分布退化（3000/3000 同 token）使 χ² 无单元格 → 多 prompt 池化 + 高温配置，并**响亮失败**代替 skip；③ 绝对阈值 `KL<1e-3` 有限样本不可达（底噪 ≈ 单元格数/N）→ 改用**自校准 KL**（对比两次串行运行底噪，≤2.5×）
+- **贪心模式说明（temperature=0 特例，与被否决方案不冲突）**：被否决的"朴素贪心接受"指**随机采样场景**下用贪心规则（会偏移分布）；而 `temperature=0` 时目标分布本身退化为**点质量**，此时采用「接受 iff `y_i == argmax(p_i)`，拒绝补 `argmax(p_i)`，bonus = `argmax(p_K)`」，输出分布（点质量）与目标严格相等 ⇔ 序列逐位相同。两种模式由 `spec_verify(..., greedy=)` 显式分流。
+- **状态**：✅ 已交付（随机 + 贪心双模式）
 
 ---
 
@@ -228,8 +230,8 @@
   - 把 EAGLE-2 的**动态树剪枝器**从"独立 draft model"剥离出来，变成**与草稿源正交的组件** `speculate/tree.py::build_tree(paths, budget)`，可服务于 LayerSkip / n-gram / Medusa 任一草稿源。
   - Medusa 实现为**可选对照**（`speculate/medusa.py`），用于回答"多头 vs 自草稿，在小模型 CPU 上谁更好"——这是原论文没有的对照维度。
 - **落地**：`speculate/tree.py`、`speculate/eagle.py`、`speculate/medusa.py`；测试 `tests/test_tree_mask.py`
-- **实测数字**：`[骨架]` — 待 T5/C2,C3：`树宽 1/2/4 下的 α 与 speedup`
-- **状态**：`[骨架]`
+- **实测数字**：树掩码/位置编码/剪枝不变量 3 条测试全绿 ✅；树状草稿端到端 α/speedup 对比 🔜（树验证与批量验证融合为后续项）
+- **状态**：🔶 掩码机制已交付；端到端树草稿基准未做
 
 ---
 
@@ -245,9 +247,10 @@
   1. **草稿跑在三值权重上**：LayerSkip 原作跑 FP 权重；我们的草稿路径与目标路径**共享同一份 1.58-bit 打包权重**，草稿不是"另一个模型"，而是"同一份权重的浅层截断"。→ **草稿模型额外参数 = 0，额外内存 = 0**（`assert extra_bytes == 0`）。
   2. **早退 head 可选零参数**：`--early-head-rank 0` 时早退 head **复用 tied embedding**（`logits_E = h_E @ tok_emb.T`），连一个参数都不新增；`r>0` 时用低秩 `A[r,d] ∥ B[r,V]` 换 FLOPs。
   3. **与量化联合优化**：层 dropout 训练 + 三值 QAT 同时进行，使中间层表示在三值约束下仍然"可读" —— 这是原作未处理的难题（低精度会显著削弱中间层语义）。
-- **落地**：`speculate/layerskip.py::LayerSkipDrafter`；`model/llama.py::forward(exit_at=E)`；训练期 `train/trainer.py` 的 LayerSkip 加权损失
-- **实测数字**：`[骨架]` — 待 T5/C2：`α = __`；`额外参数字节 = __`（目标 0）；`早退 top-1 / 主 head top-1 = __`
-- **状态**：`[骨架]`
+- **落地**：`speculate/layerskip.py::LayerSkipDrafter` + `engine.PhosModel.shadow()`（草稿器独占热 KV cache，共享权重零拷贝）；`speculate/__init__.py::generate_tokens`（热 KV 增量解码主循环）
+- **实测数字**（详见 BENCHMARKS §5.6）：`额外参数字节 = 0` ✅（`test_o1_zero_extra_bytes`）；`α = 0.849`（tiny.phos, dl=2）/ `0.550`（dl=1）/ `1.000`（合成恒等深模型 ceiling）；speedup **1.40×**（tiny.phos K=8/dl=2）· **2.23×**（合成 12 层 K=16）
+- **工程超越（原作未涉及）**：目标/草稿**双热 KV cache** + `truncate_tail` O(T) 拒绝回滚——原作与多数开源实现按轮重填或整段重算；本实现整条序列 KV 恒热，期间修复了双 cache 逐轮脱同步 1 token 的关键缺陷（未修复时 α 由 1.0 崩塌至 0.005）
+- **状态**：✅ 已交付（C1★/C2/C3/C4 达标）
 
 ---
 
@@ -258,8 +261,8 @@
 - **选型理由**：在摘要/代码编辑/模板填充等**高重复度**任务上 α 可接近 0.9，成本几乎为零 —— 必须作为 O1 的对照组，否则无法证明"自草稿的收益是真实的还是仅因为它比 n-gram 强"。
 - **我们的超越**：作为**基线对照**实现并纳入 `bench` 矩阵；同时我们给出 O1 与 n-gram 的**混合策略**（先查 n-gram，未命中再走 LayerSkip），这是两者都未做的组合。
 - **落地**：`speculate/ngram.py::NGramDrafter`
-- **实测数字**：`[骨架]` — 待 T5/C2：`n-gram α = __`（ vs O1 α = `__`）
-- **状态**：`[骨架]`
+- **实测数字**：drafter 已实现（order-3 索引 + 命中零模型成本 + 未命中回落目标前向）✅；n-gram α vs O1 α 并列基准 🔜（未入 bench 矩阵）
+- **状态**：🔶 已实现；对照基准未做
 
 ---
 

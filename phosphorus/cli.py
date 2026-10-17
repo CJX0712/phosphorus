@@ -116,6 +116,13 @@ def cmd_generate(a: argparse.Namespace) -> None:
         sink_size=getattr(a, "sink_size", 4),
         max_seqs=getattr(a, "max_seqs", 1),
     )
+    # 投机解码控制器（auto 模式启用 O2 自适应）
+    spec_mode = getattr(a, "speculate", "off")
+    controller = None
+    if str(spec_mode).lower() == "auto":
+        from . import speculate as _spec
+
+        controller = _spec.SpecController()
     # 首 token 延迟测量（C8）：prefill 一次即得到首 token 前的全部开销。
     first_latency = None
     if a.bench:
@@ -142,6 +149,9 @@ def cmd_generate(a: argparse.Namespace) -> None:
         top_p=cfg.decode.top_p,
         seed=cfg.decode.seed,
         stream=getattr(a, "stream", False),
+        speculate=spec_mode,
+        K=getattr(a, "K", 4),
+        controller=controller,
     )
     if not getattr(a, "stream", False):
         print(text)
@@ -321,6 +331,13 @@ def build_parser() -> argparse.ArgumentParser:
     pg.add_argument("--top_p", type=float, default=None)
     pg.add_argument("--stream", action="store_true")
     pg.add_argument("--bench", action="store_true")
+    pg.add_argument(
+        "--speculate",
+        default="off",
+        choices=["off", "on", "auto"],
+        help="投机解码：off=串行；on=固定 K 自草稿；auto=O2 自适应控制器（T5）",
+    )
+    pg.add_argument("--K", type=int, default=4, dest="K", help="投机草稿长度 K（T5，默认 4）")
     pg.set_defaults(func=cmd_generate)
 
     pb = sub.add_parser("bench", help="推理吞吐基准")

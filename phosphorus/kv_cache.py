@@ -196,6 +196,17 @@ class PagedKVCache:
             self.layer_len[seq_id, li] = max(0, int(self.layer_len[seq_id, li]) - n)
         return n
 
+    def truncate_tail(self, seq_id: int, n: int) -> int:
+        """丢弃序列**末尾** n 个 token（投机解码 reject 回滚），同步 layer_len。
+
+        仅当 `eviction == "none"`（逐层长度一致）下调用——投机解码强制该前提；
+        若存在逐层长度差（驱逐），本方法会整体收缩，可能破坏逐层预算，故不支持。
+        """
+        n = self.mgr.truncate_tail(seq_id, n)
+        for li in range(self.n_layer):
+            self.layer_len[seq_id, li] = max(0, int(self.layer_len[seq_id, li]) - n)
+        return n
+
     def compact(self, seq_id: int, keep_masks: np.ndarray) -> int:
         """按保留掩码压缩序列（T4-C 驱逐入口），逐层预算可不同。
 

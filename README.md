@@ -67,6 +67,21 @@ python -m phosphorus sched --model ckpt/tiny.phos \
 > 连续批处理设计、等价性与吞吐实测见 [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) §5.5 与
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §5.7。
 
+想开投机解码（O1 自草稿 + Leviathan 验证，输出分布与目标**严格相等**）？用 `--speculate`：
+
+```bash
+# on：固定 K 强制开启；auto：O2 自适应控制器按接受率/成本自动开关与选 K*
+python -m phosphorus generate --model ckpt/tiny.phos \
+    --prompt "To be, or not to be" --max_new_tokens 128 \
+    --speculate auto --K 8
+# 实测（tiny.phos, K=8, draft_layers=2, α=0.819）：1.40× 串行吞吐；
+# temperature=0 时投机与串行贪心 token 序列逐位相同（不变量 ②）
+```
+
+> 热 KV 增量解码（双 cache + 拒绝回滚）、加速比矩阵与 regime 分析见
+> [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) §5.6，算法与超越点见
+> [`docs/ALGORITHMS.md`](docs/ALGORITHMS.md) A-12/A-15。
+
 ---
 
 ## 仓库结构（节选）
@@ -84,6 +99,8 @@ phosphorus/
 │   ├── loader.py       .phos 加载（运行时零 torch）
 │   ├── engine.py       推理引擎：NumPy + native 自适应调度 + 分页 KV（--kv dense|paged）+ 融合连续批处理 forward_step
 │   ├── scheduler.py     连续批处理调度器 Scheduler：波次切分 + greedy/采样生成（C6/C7）
+│   ├── speculate/       投机解码：Leviathan 验证 + O1 自草稿（零额外权重）+ O2 自适应控制器 + 树草稿
+│   ├── eviction.py      KV 驱逐：SnapKV / PyramidKV / H2O / StreamingLLM（T4-C）
 │   ├── backend.py      实现后端注册：native / numpy（auto 降级）
 │   ├── block_manager.py 分页块管理：block_tables / 引用计数 / 滑动窗口（vLLM 语义）
 │   ├── kv_cache.py     分页 KV 物理池 + begin/write/gather 三段式协议

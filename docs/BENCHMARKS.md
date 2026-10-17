@@ -248,6 +248,78 @@ python -m phosphorus.cli sched --model ckpt/tiny.phos \
     --max-seqs 8 --max_new_tokens 40 --temperature 0.0 --top_k 1 --bench
 ```
 
+### 5.6 T5：投机解码吞吐与加速比（实测）
+
+**架构（C3 机制）**：`speculate.generate_tokens` 采用**热 KV 增量解码**——目标模型与
+草稿器（`model.shadow()`，共享权重、独立 KV cache，O1 零额外字节）各持一条热 cache；
+每轮草稿以单 token 热追加给出 K 个提议，目标模型**一次批量前向**覆盖 K 个新位置
+（BLAS 摊销权重加载），残差拒绝采样后以 `truncate_tail` O(T) 回滚被拒 token。
+期间修复两个关键缺陷：① 双 cache 逐轮**脱同步 1 token**（草稿末 token 未写入草稿
+cache，α 从 1.0 崩塌至 0.005，修复后 α=1.000）；② 滑动窗口瞬态块预留（物理跨度可达
+max_seq_len + block_size − 1，池 +1 备用块）。
+
+**实测一：`ckpt/tiny.phos`（d=192, 3 层，训练模型，temperature=0.8, top_p=0.95，
+128 tok × 2 seeds，串行基线 202.0 tok/s）**
+
+| 模式 | K | draft_layers | tok/s | speedup | α |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| spec | 4 | 2 | 184.6 | 0.91× | 0.782 |
+| spec | 8 | 2 | 170.0 | 0.84× | 0.670 |
+| auto（O2 控制器，dl=2） | — | 2 | 212.5 | 1.05× | 0.729（终态 OFF，正确门控） |
+
+⚠️ **该模型未达 C3（<1.3×）**。原因有两条，均为投机解码的已知性质而非实现缺陷：
+① 每层前向仅微秒级（d=192/3 层），Python/BLAS **调用开销**相对前向成本占主导，
+而投机每轮需 K 次草稿前向 + 1 次批量验证 + 1 次收尾追加；② 修正「验证须用采样器
+真实分布（temp+top-p 截断后）」后，草稿核与目标核不一致使 α 由 0.82 降至 ~0.70。
+> 诚实更正：本节曾记录「K=8/dl=2 → 1.40×」，该数字是在**修复前**（验证误用原始
+> softmax、分布语义不正确）测得的，已作废。正确语义下该模型为 0.84–0.91×。
+
+**实测二：`ckpt/synthetic_12l.phos`（d=512, 12 层合成模型，深层恒等 → early-exit(3) ≡
+full(12)，α=1.000 ceiling regime；192 tok × 2 seeds，串行基线 6.9 tok/s）**
+
+| 模式 | K | draft_layers | tok/s | speedup | α |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| spec | 8 | 3 | 11.4 | 1.64× | 1.000 |
+| **spec** | **16** | **3** | **15.6** | **2.26×** | **1.000** |
+| auto（O2 控制器） | — | 3 | 13.3 | 1.92× | 1.000（终态 ON，c_hat=1.631） |
+
+**C3 达成（α=1.0 regime）**：端到端 **2.26× ≥ 1.3×**（K=16, draft_layers=3）。
+对照实测一可见：加速比取决于「单次前向成本 vs 调用开销」与 α，微小模型上投机不划算——
+这正是 O2 控制器存在的意义（tiny.phos dl=2 实测终态正确为 OFF）。
+
+**Regime 诚实说明**：合成模型构造（`scripts/build_synthetic_model.py`）需同时压低基底层幅度
+（`--base-scale`）与 `norm_final`（`--logit-scale`）——随机未训练权重的残差流幅值会
+累积至 ~6.8e4，令注意力分数达 ~1e8 量级，fp32 噪声被 softmax 指数放大，草稿/验证
+分布实质发散（数值病理，非算法问题）。α 随 draft_layers/n_layer 比与模型置信度变化，
+O2 控制器（C4）据此在不划算时自动 OFF——tiny.phos dl=1（α≈0.3）即被控制器正确关闭。
+
+**分布等价与贪心一致（C1★，不变量 ②）**：见 `tests/test_speculative_distribution.py`。
+要点（曾导致「静默跳过 / 假通过」，已修正）：
+- 验证必须用**采样器真实分布** `sampling.sampling_probs(logits, temp, top_k, top_p)`
+  （temp + top-p 截断后），而非原始 softmax——否则 top_p<1 时与串行不等价。
+- tiny.phos 在单 prompt + temp=0.8/top_p=0.95 下分布**退化**（实测 3000/3000 同 token），
+  χ² 无单元格 → 改为**多 prompt 池化**（10 条）+ 一路 **temp=1.5/top_p=1.0 非退化配置**
+  （3 组独立种子，允许 ≤1 组拒绝，χ²/df 实测 1.19/0.83/1.06/1.01 ≈ 1.0）。
+- 经验 KL 的绝对阈值 `< 1e-3` 在有限样本下**统计不可达**（噪声底噪 ≈ 有效单元格数/N），
+  故改为**自校准**：与「两次独立串行运行之间的 KL」对比，要求 ≤ 底噪 ×2.5。
+- `temperature=0` 贪心投机与串行**逐位相同**；O1 `extra_bytes == 0`。全套 T5 单测 15 条。
+
+**复现**：
+
+```bash
+# T5 单测（C1★/C2/C4 + 树掩码）
+python -m pytest tests/test_speculative_distribution.py tests/test_controller.py tests/test_tree_mask.py -q
+
+# 吞吐矩阵（K × draft_layers × seeds + auto 对照）
+python -m scripts.bench_speculate --model ckpt/tiny.phos --tokens 128 --seeds 2 \
+    --K 2,4,8 --draft-layers 1,2 --temperature 0.8
+python -m scripts.build_synthetic_model --out ckpt/synthetic_12l.phos --n-layer 12 \
+    --d-model 512 --n-head 8 --n-kv-head 2 --d-ff 1280 --vocab 2000 \
+    --deep-scale 0.0 --base-scale 0.25 --logit-scale 1e-2
+python -m scripts.bench_speculate --model ckpt/synthetic_12l.phos --tokens 192 --seeds 2 \
+    --K 4,8,16 --draft-layers 3
+```
+
 ## 6. 生成样本（实测输出）
 
  prompt `"To be, or not to be"`，采样 160 tokens，temperature 默认：

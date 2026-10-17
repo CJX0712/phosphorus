@@ -166,6 +166,27 @@ class BlockManager:
         self.dropped[seq_id] += num_tokens
         return num_tokens
 
+    def truncate_tail(self, seq_id: int, num_tokens: int) -> int:
+        """丢弃序列**末尾** num_tokens 个 token（投机解码 reject 回滚用），返回实际数。
+
+        与 drop_tokens 互为对称：只释放尾部整块、收缩 `seq_len`，逻辑→物理映射
+        永不错位；被释放块的 KV 数据无需搬运。head_offset 不变（首块槽位保留）。
+        """
+        n = int(self.seq_lens[seq_id])
+        num_tokens = int(min(int(num_tokens), n))
+        if num_tokens <= 0:
+            return 0
+        end = int(self.head_offset[seq_id]) + int(self.seq_lens[seq_id])
+        new_len = int(self.seq_lens[seq_id]) - num_tokens
+        new_end = int(self.head_offset[seq_id]) + new_len
+        old_blocks = (end + self.block_size - 1) // self.block_size
+        new_blocks = (new_end + self.block_size - 1) // self.block_size
+        for j in range(new_blocks, old_blocks):
+            self.release_block(int(self.block_tables[seq_id, j]))
+            self.block_tables[seq_id, j] = NULL_BLOCK
+        self.seq_lens[seq_id] = new_len
+        return num_tokens
+
     # ----------------------------- 共享（前缀复用预留） ----------------------------- #
     def touch(self, seq_id: int, n_blocks: int) -> None:
         """把前 n_blocks 个块的引用计数 +1（vLLM 前缀缓存命中路径预留）。

@@ -38,12 +38,14 @@
 ### 0.4 当前实现状态（v0.1.0 · 2026-10）
 
 > 下表给出**规划架构（本文 mermaid + §2.2）**与**已落地代码**的对照。
-> T1–T3 已交付为**扁平包** `phosphorus/`（单文件模块，无 `utils/`、`model/`、`quantize/`、`kernels/`、`speculate/`、`bench/`、`convert/` 子包）；
+> T1–T3 已交付为**扁平包** `phosphorus/`（单文件模块，无 `utils/`、`model/`、`quantize/`、`kernels/` 子包）；
 > T4（原生 C99 内核）已交付 **T4-A**（GEMM + pack + 归一化/softmax/RoPE 内核）、
 > **T4-B**（分页 KV + 块管理 + 引擎接入）、**T4-C**（KV 驱逐 SnapKV/PyramidKV/H2O/StreamingLLM）；
 > **T4-D**（连续批处理调度器 + 融合前向 + 采样器）已交付：8 条序列融合前向 token id 与逐条串行逐位一致，吞吐 **2.35×**；
 > **T4-E**（端到端生成 C8 + 文档收尾）已交付：`phosphorus generate` 连贯文本 + `--stream` 逐 token + `--bench` 首 token 延迟实测 4/18 ms（≪500ms），全量文档同步；
-> T5 为**规划中**，见 `TASKS.md`。
+> **T5**（投机解码）核心已交付：O1 自草稿（零额外权重）+ Leviathan 验证（随机 + 贪心双模式）+
+> **热 KV 增量解码**（目标/草稿双 cache + `truncate_tail` 拒绝回滚）+ O2 自适应控制器 + 树草稿掩码。
+> C1 分布等价（χ² p>0.05 / KL<1e-3，20k 采样）与 C2 零额外字节已由测试硬门证明；C3/C5/C6 见 `BENCHMARKS.md` §T5。
 
 | 规划模块 | 实际落地文件 | 状态 |
 |---|---|---|
@@ -60,7 +62,10 @@
 | `kernels/native/*` | `phosphorus/csrc/*.{c,h}` + `phosphorus/native/*` | ✅ T4-A（zig cc 编译，位精确） |
 | 实现后端注册 | `phosphorus/backend.py` | ✅ T4-A |
 | 连续批处理调度器 | `phosphorus/scheduler.py`（`Scheduler` + 波次切分 + greedy/采样生成） | ✅ T4-D（C6 等价 + C7 采样；融合 8 条吞吐 2.35×） |
-| `speculate/*` / `bench/*` / `convert/*` | 未实现（基准脚本 `scripts/bench_*.py` 已随 T4-A 落地） | 🔜 T4-E / T5 规划中 |
+| KV 驱逐策略 | `phosphorus/eviction.py`（SnapKV/PyramidKV/H2O/StreamingLLM + 统一保留掩码） | ✅ T4-C（不变量⑦） |
+| `speculate/*`（投机解码） | `phosphorus/speculate/{verify,layerskip,ngram,controller,tree,eagle,medusa,base}.py` + `engine.truncate_tail/shadow` + `speculate.generate_tokens` 热 KV 主循环 | ✅ T5（C1★ 分布等价 + C2 零额外字节 + C4 控制器；C3/C5/C6 见 BENCHMARKS §T5） |
+| `bench/*` | `scripts/bench_speculate.py`（吞吐矩阵）+ `scripts/build_synthetic_model.py`（regime 演示模型） | ✅ T5-C5/C6 |
+| `convert/*` | HF 导入/导出 | 🔜 T5-C8（P1） |
 
 ---
 
@@ -189,9 +194,12 @@ phosphorus/
 │   ├── setup.ps1                      # Windows 等价
 │   ├── smoke_zig.c                    # O4 zig cc 冒烟（T4 落地前提前验证）
 │   ├── bench_kernels.py               # T4-A 内核级基准（含位一致性校验）
-│   └── bench_native.py                # T4-A 端到端基准（native vs numpy）
+│   ├── bench_native.py                # T4-A 端到端基准（native vs numpy）
+│   ├── measure_eviction.py            # T4-C 驱逐策略质量基准（下游 logits 余弦）
+│   ├── bench_speculate.py             # T5 投机解码吞吐矩阵（C3/C5/C6）
+│   └── build_synthetic_model.py       # T5 合成深层模型构造（加速比 regime 演示）
 ├── .github/workflows/ci.yml           # ubuntu-latest, py3.10/3.11/3.12
-├── phosphorus/                        # 扁平包（T1–T3 已落地；无 model/ quantize/ kernels/ speculate/ bench/ 子包）
+├── phosphorus/                        # 扁平包（T1–T5 已落地；无 model/ quantize/ kernels/ 子包）
 │   ├── __init__.py                    # __version__, backend 探测
 │   ├── __main__.py                    # python -m phosphorus
 │   ├── cli.py                         # argparse 子命令：train/export/generate/bench/tokenize
@@ -209,7 +217,19 @@ phosphorus/
 │   ├── block_manager.py               # 分页块管理：block_tables / 引用计数 / 滑动窗口（T4-B）
 │   ├── kv_cache.py                    # 分页 KV 物理池 [n_blocks, n_layer, 2, bs, n_kv, dh]（T4-B）
 │   ├── attention.py                   # GQA 注意力：paged / dense 同一数学核心（T4-B）
+│   ├── eviction.py                    # KV 驱逐策略：SnapKV / PyramidKV / H2O / StreamingLLM（T4-C）
+│   ├── scheduler.py                   # 连续批处理调度器：add/abort + forward_step 融合（T4-D）
 │   ├── sampling.py                    # top-k / top-p / temp
+│   ├── speculate/                     # 投机解码子包（T5，扁平增量）
+│   │   ├── __init__.py                # generate_tokens：热 KV 增量解码主循环（草稿+验证+回滚）
+│   │   ├── base.py                    # Drafter / DrafterSpec 抽象
+│   │   ├── verify.py                  # Leviathan 残差拒绝采样（随机 + 贪心双模式，不变量②）
+│   │   ├── layerskip.py               # O1 自草稿（early-exit，extra_bytes==0）
+│   │   ├── ngram.py                   # n-gram 草稿对照（零模型成本命中）
+│   │   ├── controller.py              # O2 自适应控制器（EWMA α/c + 状态机 + K* 决策）
+│   │   ├── tree.py                    # 树状草稿：祖先因果掩码 + 剪枝
+│   │   ├── eagle.py                   # EAGLE 对照位（当前别名 LayerSkip，P1 扩展点）
+│   │   └── medusa.py                  # Medusa 对照位（当前别名 LayerSkip，P1 扩展点）
 │   ├── csrc/                          # 原生 C99 源码（随 wheel 分发）
 │   │   ├── phos.h                     # 原生内核 ABI 头（ABI version 1）
 │   │   ├── phos_gemm.c                # TL / I2_S GEMM（scalar + AVX2）
@@ -233,7 +253,12 @@ phosphorus/
 │   ├── test_no_torch.py               # 推理路径零 torch 导入
 │   ├── test_paged_kv.py               # T4-B：块管理 / 物理池 / 注意力对齐（20 条）
 │   ├── test_engine_paged.py           # T4-B：引擎级 paged ↔ dense 等价（7 条）
-│   └── test_native_backend.py         # T4-A：native 内核 50 条断言（L0–L6）
+│   ├── test_native_backend.py         # T4-A：native 内核 50 条断言（L0–L6）
+│   ├── test_kv_eviction.py            # T4-C：驱逐策略预算/掩码/质量（不变量⑦）
+│   ├── test_scheduler.py              # T4-D：连续批处理调度（add/abort/融合等价）
+│   ├── test_speculative_distribution.py # T5-C1/C2：分布等价 χ²+KL / 贪心逐位一致 / O1 零额外字节
+│   ├── test_controller.py             # T5-C4：O2 控制器状态机 / 门控 / K* 决策
+│   └── test_tree_mask.py              # T5：树草稿因果掩码 / 剪枝不变量
 ├── data/raw/
 │   └── tinyshakespeare.txt            # 离线兜底语料（随仓库提交，1.1 MB）
 ├── NOTICE                            # 第三方代码归属（BitNet.cpp I2_S SIMD 移植，MIT）
@@ -264,9 +289,16 @@ phosphorus/
 | `phosphorus/sampling.py` | temperature / top-k / top-p 采样 | `sample` | ✅ T3 |
 | `phosphorus/cli.py` | 子命令分发：`train / export / generate / bench / tokenize`（`--kv`/`--backend`） | `build_parser`, `main` | ✅ T1 + T4-B |
 | `phosphorus/csrc/phos.h` | 原生 C99 内核 ABI 头（TL GEMM / RMSNorm / softmax / RoPE / pack） | `phos_tl_gemm_f32` 等 | ✅ T4-A（随 wheel 分发） |
-| `speculate/*` | O1 自草稿 / O2 控制器 / 树 / Leviathan 验证 | — | 🔜 T5 规划中 |
-| `bench/*` | 基准矩阵 / Pareto 曲线 | — | 🔜 T5 规划中 |
-| `convert/*` | HF 导入/导出 | — | 🔜 T5 规划中 |
+| `phosphorus/eviction.py` | KV 驱逐策略（SnapKV/PyramidKV/H2O/StreamingLLM，逐层预算 + 统一保留 sink+窗口） | `make_policy`, `EvictionConfig`, `EVICTIONS` | ✅ T4-C（不变量⑦） |
+| `phosphorus/scheduler.py` | 连续批处理调度：多 prompt 波次切分 + greedy/采样生成 | `Scheduler` | ✅ T4-D（吞吐 2.35×） |
+| `phosphorus/speculate/verify.py` | Leviathan 残差拒绝采样（随机模式分布严格等价；贪心模式逐位一致） | `spec_verify`, `VerifyResult` | ✅ T5-C1★（不变量②） |
+| `phosphorus/speculate/layerskip.py` | O1 自草稿：early-exit 复用同一权重，extra_bytes==0 | `LayerSkipDrafter` | ✅ T5-C2 |
+| `phosphorus/speculate/ngram.py` | order-3 n-gram 草稿对照（命中零模型成本） | `NGramDrafter` | ✅ T5 |
+| `phosphorus/speculate/controller.py` | O2 自适应控制器：EWMA α/c + OFF/WARMUP/ON/DEGRADED 状态机 + K* 决策 | `SpecController`, `SpecPlan` | ✅ T5-C4 |
+| `phosphorus/speculate/tree.py` | 树状草稿：平衡树构建 + 祖先因果掩码 + 概率剪枝 | `TreeSpec`, `build_balanced_tree` | ✅ T5 |
+| `phosphorus/speculate/__init__.py` | 热 KV 增量投机主循环：双 cache 草稿/验证 + `truncate_tail` 拒绝回滚 | `generate_tokens` | ✅ T5-C3 机制 |
+| `scripts/bench_speculate.py` | 投机解码吞吐矩阵（K × draft_layers × seeds，含接受率 α） | — | ✅ T5-C5/C6 |
+| `convert/*` | HF 导入/导出 | — | 🔜 T5-C8（P1） |
 | `convert.hf_*` | HF `transformers` ↔ `.phos` / ckpt 互转 | safetensors | 目标格式 | `import_hf()`, `export_hf()` |
 
 ---

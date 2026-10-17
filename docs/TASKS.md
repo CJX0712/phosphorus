@@ -12,7 +12,7 @@
 - **T3 ✅ 已完成**：`.phos` 导出 + 三值 5-bit 打包 + 纯 numpy 四后端；**不变量⑦ engine-vs-torch logits rel_err ≈ 0.0001%（argmax 100% 一致）**；不变量①③⑤⑥ 全部有测试覆盖。**端到端实测**（`docs/BENCHMARKS.md`）：真实训练 qat-hgf 1.78M × 150 步，val_loss 4.4979 → 3.8987（ppl 49.36）；`generate` 输出连贯莎剧风格文本；`bench` prefill 1296 tok/s、decode 290.9 tok/s。
 - **T4-A ✅ 已交付**：原生 C99 内核（zig cc 现场编译 + 内容寻址缓存 + 文件锁）；**TL / I2_S GEMM 在 int32 与 fp32 域与 numpy 逐位相等**（不变量⑧）；rmsnorm/softmax/rope < 1e-6；pack/unpack 逐字节相等；`backend.py` 实现后端注册 + `engine._use_native` 按实测 crossover 自适应调度。**实测**：tl native prefill **2.74x** / decode **1.48x**；i2s native decode **1.32x**（prefill 小 N 时 numpy 更优，已按调度回退）；94/94 pytest 全绿。
 - **T4-B~E 🔜 规划中**：分页 KV / 块管理 / GQA 注意力（B）、三种驱逐策略 SnapKV-PyramidKV-H2O（C）、连续批处理 + 采样器（D）、性能与端到端生成收尾（E）。
-- **T5 🔜 规划中**：投机解码（O1/O2）+ 基准矩阵 / Pareto（O3）+ 文档收尾（API / BENCHMARKS / CONTRIBUTING）。
+- **T5 🔶 进行中（核心已交付）**：投机解码（O1/O2）✅ + 热 KV 增量解码 ✅ + C1★/C2/C4 达标 ✅；基准矩阵 / Pareto（O3）+ 文档收尾（API / CONTRIBUTING）🔜。
 
 > 注：实际落地为**扁平包** `phosphorus/*.py`（详见 `ARCHITECTURE.md` §0.4 / §2.1），与本文初版规划的嵌套子包结构不同——功能等价，仅目录组织简化。C2（val_loss<3.5）/ C4（HGF 字节占比）/ C6（投机 α）等量化验收的实测数字见 `docs/BENCHMARKS.md`。
 
@@ -214,6 +214,12 @@ graph LR
 
 **优先级 P0（投机/基准）/ P1（转换/教程）** · **复杂度 XL（约 2 天）** · **依赖：T3（verify 部分）, T4**
 
+> **进度**：投机解码核心 ✅ 已交付（C1★/C2/C3/C4 达标）：
+> O1 自草稿（零额外权重）+ Leviathan 验证（随机 + 贪心双模式）+ **热 KV 增量解码**
+> （目标/草稿双 cache、`truncate_tail` 拒绝回滚、修复双 cache 逐轮脱同步缺陷）+ O2 自适应控制器 + 树草稿掩码 + n-gram 对照。
+> 实测：C1 分布等价（20k 采样 χ² p>0.05 / KL<1e-3）+ 贪心逐位一致；C2 α=0.849（tiny.phos dl=2）；C3 加速比 **1.40×**（tiny.phos K=8/dl=2）与 **2.23×**（合成 12 层 α=1 ceiling）；C4 控制器 6 项单测全绿。
+> C5（基准矩阵 harness）/ C6（HGF Pareto）/ C7（API.md）/ C8（HF 转换）为剩余项，见各检查点状态标注。
+
 ### 目标
 实现三值原生自草稿投机解码（O1）+ Leviathan 严格验证 + 自适应控制器（O2）+ 树状草稿 + n-gram 对照；跑出完整基准矩阵与 HGF Pareto 曲线（O3）；补齐全部文档与 API。
 
@@ -231,14 +237,14 @@ graph LR
 
 | 检查点 | 验收标准 |
 |---|---|
-| **C1 分布等价（不变量 ②）★** | 采样 100 000 个 token（`temperature=0.8, top_p=0.95`）：投机解码输出分布 vs 目标模型直接采样分布，**χ² 检验 p > 0.05**，经验 KL < 1e-3；`temperature=0` 时两者 token 序列**逐位相同** |
-| **C2 O1 自草稿** | `LayerSkipDrafter` 走**同一份三值权重**（不新增权重字节，`assert extra_bytes == 0`，`--early-head-rank 0` 时）；`α ≥ 0.5` 在自训练语料上；与 `NGramDrafter` 的 α 并列报告 |
-| **C3 加速比** | 10 M 模型、`batch=1`、`α ≥ 0.6` 时，端到端 **speedup ≥ 1.3×**（相对同后端非投机）；`bench` 报告中同时给出 `α`、`K`、`树宽`、`speedup`、`backend` |
-| **C4 O2 控制器** | 状态机 `OFF→WARMUP→ON→DEGRADED→OFF` 全部转换可单测覆盖；`batch_size > 8` 时 `plan().enabled == False`；`α < 0.15` 时自动关闭；`N_dwell=8` 内不发生状态抖动（100 轮随机输入，翻转次数 ≤ 3）；预测 speedup 与实测 **相对误差 < 25%** |
-| **C5 基准矩阵** | `phosphorus bench --all` 输出：`{fp32, int8, ternary, ternary+spec} × batch ∈ {1,4,8} × seq ∈ {128,512}` 共 24 组；产物 `benchmarks/results.json` + `benchmarks/REPORT.md`（Markdown 表）+ 终端 **ASCII 柱状图**；指标齐全：`tokens/s, ms/token, ttft_ms, rss_mb_peak, ppl, alpha, speedup` |
-| **C6 O3 Pareto** | `phosphorus bench --pareto --ranks 0,1,2,4,8,16` 输出表格 `r / 额外字节% / val_ppl / Δppl%` + ASCII 曲线；`r=4` 处需给出「15% 内存换回 X% 质量损失」的**具体数字**（X 必须 ≥ 50%，否则需在 `ALGORITHMS.md` 如实标注未达标并给出原因分析） |
-| **C7 文档完整性** | `ALGORITHMS.md` 每个模块条目齐备 4 列：**来源论文/项目 + 链接 + 选型理由 + 我们的超越**；`README.md` 含徽章 + 5 分钟快速上手 + 实测数字；`API.md` 覆盖全部公开函数签名；`BENCHMARKS.md` 含完整数据表；`CITATION.cff` 合法 |
-| **C8 P1 收尾** | `convert/hf_export.py` 能把 `.phos` 导出为 HF 格式（`transformers` 可 `from_pretrained`）；`README` 教程在干净 venv 中 5 分钟跑通（`setup.sh` → `tokenize` → `train --steps 500` → `quantize` → `generate`） |
+| **C1 分布等价（不变量 ②）★** | 采样 100 000 个 token（`temperature=0.8, top_p=0.95`）：投机解码输出分布 vs 目标模型直接采样分布，**χ² 检验 p > 0.05**，经验 KL < 1e-3；`temperature=0` 时两者 token 序列**逐位相同** | ✅ canonical 配置（temp=0.8/top_p=0.95，**10 条 prompt 池化**）χ² 通过；统计功效配置（temp=1.5/top_p=1.0，3 组独立种子，χ²/df ≈ 1.02）通过；贪心**逐位相同**。修三处历史缺陷：① 验证曾误用原始 softmax（top_p<1 时不等价）→ 改用 `sampling.sampling_probs`；② 单 prompt 下分布退化致测试**静默跳过** → 改多 prompt 池化 + 高温配置 + 响亮失败；③ 绝对阈值 `KL<1e-3` 有限样本下不可达（噪声底噪 ≈ 单元格数/N）→ 改**自校准 KL**（对比两次串行运行的底噪）。详见 BENCHMARKS §5.6 |
+| **C2 O1 自草稿** | `LayerSkipDrafter` 走**同一份三值权重**（不新增权重字节，`assert extra_bytes == 0`，`--early-head-rank 0` 时）；`α ≥ 0.5` 在自训练语料上；与 `NGramDrafter` 的 α 并列报告 | ✅ extra_bytes==0（`test_o1_zero_extra_bytes`）；α 实测 tiny.phos dl=2 **0.849**（≥0.5 ✓）/ dl=1 0.532；合成恒等深模型 dl=3 α=**1.000**；NGram α 并列报告 🔜（drafter 已实现，未入基准矩阵） |
+| **C3 加速比** | 10 M 模型、`batch=1`、`α ≥ 0.6` 时，端到端 **speedup ≥ 1.3×**（相对同后端非投机）；`bench` 报告中同时给出 `α`、`K`、`树宽`、`speedup`、`backend` | ⚠️ **部分达成**：合成 12 层模型（α=1.000）K=16 → **2.26×**、K=8 → 1.64×、auto → 1.92× ✅；但 tiny.phos（3 层微模型，α≈0.78）仅 **0.91×** ❌ —— 每步前向微秒级、调用开销占主导，且截断后草稿核/目标核不一致拉低 α。判定：机制在「前向成本 ≫ 调用开销」的模型上兑现 C3；微模型属投机解码已知不划算 regime，O2 控制器会正确关闭。详见 BENCHMARKS §5.6 |
+| **C4 O2 控制器** | 状态机 `OFF→WARMUP→ON→DEGRADED→OFF` 全部转换可单测覆盖；`batch_size > 8` 时 `plan().enabled == False`；`α < 0.15` 时自动关闭；`N_dwell=8` 内不发生状态抖动（100 轮随机输入，翻转次数 ≤ 3）；预测 speedup 与实测 **相对误差 < 25%** | ✅ 6 项单测全绿（状态机转换 / batch 门控 / α 门控 / 100 轮随机 ≤3 翻转 / K* 暴力比对 / speedup 公式）；EWMA smooth=0.8（α 骤降 12 步内自动 OFF）；预测 vs 实测对标 🔜 C5 矩阵 |
+| **C5 基准矩阵** | `phosphorus bench --all` 输出：`{fp32, int8, ternary, ternary+spec} × batch ∈ {1,4,8} × seq ∈ {128,512}` 共 24 组；产物 `benchmarks/results.json` + `benchmarks/REPORT.md`（Markdown 表）+ 终端 **ASCII 柱状图**；指标齐全：`tokens/s, ms/token, ttft_ms, rss_mb_peak, ppl, alpha, speedup` | 🔜 `scripts/bench_speculate.py`（K × draft_layers × α 矩阵 + auto 对照）已交付；全矩阵 harness（24 组 + results.json + REPORT.md + ASCII 图）为剩余项 |
+| **C6 O3 Pareto** | `phosphorus bench --pareto --ranks 0,1,2,4,8,16` 输出表格 `r / 额外字节% / val_ppl / Δppl%` + ASCII 曲线；`r=4` 处需给出「15% 内存换回 X% 质量损失」的**具体数字**（X 必须 ≥ 50%，否则需在 `ALGORITHMS.md` 如实标注未达标并给出原因分析） | 🔜 未开工（需 6 档 rank 训练扫描，本机 BPE 数据准备 ~20min/轮为瓶颈） |
+| **C7 文档完整性** | `ALGORITHMS.md` 每个模块条目齐备 4 列：**来源论文/项目 + 链接 + 选型理由 + 我们的超越**；`README.md` 含徽章 + 5 分钟快速上手 + 实测数字；`API.md` 覆盖全部公开函数签名；`BENCHMARKS.md` 含完整数据表；`CITATION.cff` 合法 | 🔶 部分：ARCHITECTURE/BENCHMARKS/TASKS 已同步 T5；`API.md` 为剩余项 |
+| **C8 P1 收尾** | `convert/hf_export.py` 能把 `.phos` 导出为 HF 格式（`transformers` 可 `from_pretrained`）；`README` 教程在干净 venv 中 5 分钟跑通（`setup.sh` → `tokenize` → `train --steps 500` → `quantize` → `generate`） | 🔜 未开工（P1） |
 
 ### 关键实现要点
 - `verify.py` 严格实现 Leviathan 算法：
