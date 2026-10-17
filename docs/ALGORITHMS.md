@@ -248,7 +248,7 @@
   2. **早退 head 可选零参数**：`--early-head-rank 0` 时早退 head **复用 tied embedding**（`logits_E = h_E @ tok_emb.T`），连一个参数都不新增；`r>0` 时用低秩 `A[r,d] ∥ B[r,V]` 换 FLOPs。
   3. **与量化联合优化**：层 dropout 训练 + 三值 QAT 同时进行，使中间层表示在三值约束下仍然"可读" —— 这是原作未处理的难题（低精度会显著削弱中间层语义）。
 - **落地**：`speculate/layerskip.py::LayerSkipDrafter` + `engine.PhosModel.shadow()`（草稿器独占热 KV cache，共享权重零拷贝）；`speculate/__init__.py::generate_tokens`（热 KV 增量解码主循环）
-- **实测数字**（详见 BENCHMARKS §5.6）：`额外参数字节 = 0` ✅（`test_o1_zero_extra_bytes`）；`α = 0.849`（tiny.phos, dl=2）/ `0.550`（dl=1）/ `1.000`（合成恒等深模型 ceiling）；speedup **1.40×**（tiny.phos K=8/dl=2）· **2.23×**（合成 12 层 K=16）
+- **实测数字**（详见 BENCHMARKS §5.6）：`额外参数字节 = 0` ✅（`test_o1_zero_extra_bytes`）；`α = 0.849`（tiny.phos, dl=2）/ `0.550`（dl=1）/ `1.000`（合成恒等深模型 ceiling）；speedup：tiny.phos（3 层微模型，每步前向微秒级、调用开销占主导）仅 **0.91×** ❌，合成 12 层模型 K=16 **2.26×** ✅、K=8 **1.64×**、auto **1.92×** —— 投机在前向成本 ≫ 调用开销的模型上兑现（C3 判定见 TASKS.md）
 - **工程超越（原作未涉及）**：目标/草稿**双热 KV cache** + `truncate_tail` O(T) 拒绝回滚——原作与多数开源实现按轮重填或整段重算；本实现整条序列 KV 恒热，期间修复了双 cache 逐轮脱同步 1 token 的关键缺陷（未修复时 α 由 1.0 崩塌至 0.005）
 - **状态**：✅ 已交付（C1★/C2/C3/C4 达标）
 

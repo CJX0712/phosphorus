@@ -217,8 +217,8 @@ graph LR
 > **进度**：投机解码核心 ✅ 已交付（C1★/C2/C3/C4 达标）：
 > O1 自草稿（零额外权重）+ Leviathan 验证（随机 + 贪心双模式）+ **热 KV 增量解码**
 > （目标/草稿双 cache、`truncate_tail` 拒绝回滚、修复双 cache 逐轮脱同步缺陷）+ O2 自适应控制器 + 树草稿掩码 + n-gram 对照。
-> 实测：C1 分布等价（20k 采样 χ² p>0.05 / KL<1e-3）+ 贪心逐位一致；C2 α=0.849（tiny.phos dl=2）；C3 加速比 **1.40×**（tiny.phos K=8/dl=2）与 **2.23×**（合成 12 层 α=1 ceiling）；C4 控制器 6 项单测全绿。
-> C5（基准矩阵 harness）/ C6（HGF Pareto）/ C7（API.md）/ C8（HF 转换）为剩余项，见各检查点状态标注。
+> 实测：C1 分布等价（多 prompt 池化，χ²/df ≈ 1.02 + 自校准 KL）与贪心逐位一致；C2 α=0.849（tiny.phos dl=2）；C3 加速比：tiny.phos（3 层微模型）**0.91×** ❌ vs 合成 12 层模型 K=16 **2.26×** ✅（α=1.000 ceiling）；C4 控制器 6 项单测全绿。
+> C5（基准矩阵 harness）/ C6（HGF Pareto）/ C8（HF 转换）为剩余项；C7（API.md）✅ 已交付，见各检查点状态标注。
 
 ### 目标
 实现三值原生自草稿投机解码（O1）+ Leviathan 严格验证 + 自适应控制器（O2）+ 树状草稿 + n-gram 对照；跑出完整基准矩阵与 HGF Pareto 曲线（O3）；补齐全部文档与 API。
@@ -243,7 +243,7 @@ graph LR
 | **C4 O2 控制器** | 状态机 `OFF→WARMUP→ON→DEGRADED→OFF` 全部转换可单测覆盖；`batch_size > 8` 时 `plan().enabled == False`；`α < 0.15` 时自动关闭；`N_dwell=8` 内不发生状态抖动（100 轮随机输入，翻转次数 ≤ 3）；预测 speedup 与实测 **相对误差 < 25%** | ✅ 6 项单测全绿（状态机转换 / batch 门控 / α 门控 / 100 轮随机 ≤3 翻转 / K* 暴力比对 / speedup 公式）；EWMA smooth=0.8（α 骤降 12 步内自动 OFF）；预测 vs 实测对标 🔜 C5 矩阵 |
 | **C5 基准矩阵** | `phosphorus bench --all` 输出：`{fp32, int8, ternary, ternary+spec} × batch ∈ {1,4,8} × seq ∈ {128,512}` 共 24 组；产物 `benchmarks/results.json` + `benchmarks/REPORT.md`（Markdown 表）+ 终端 **ASCII 柱状图**；指标齐全：`tokens/s, ms/token, ttft_ms, rss_mb_peak, ppl, alpha, speedup` | 🔜 `scripts/bench_speculate.py`（K × draft_layers × α 矩阵 + auto 对照）已交付；全矩阵 harness（24 组 + results.json + REPORT.md + ASCII 图）为剩余项 |
 | **C6 O3 Pareto** | `phosphorus bench --pareto --ranks 0,1,2,4,8,16` 输出表格 `r / 额外字节% / val_ppl / Δppl%` + ASCII 曲线；`r=4` 处需给出「15% 内存换回 X% 质量损失」的**具体数字**（X 必须 ≥ 50%，否则需在 `ALGORITHMS.md` 如实标注未达标并给出原因分析） | 🔜 未开工（需 6 档 rank 训练扫描，本机 BPE 数据准备 ~20min/轮为瓶颈） |
-| **C7 文档完整性** | `ALGORITHMS.md` 每个模块条目齐备 4 列：**来源论文/项目 + 链接 + 选型理由 + 我们的超越**；`README.md` 含徽章 + 5 分钟快速上手 + 实测数字；`API.md` 覆盖全部公开函数签名；`BENCHMARKS.md` 含完整数据表；`CITATION.cff` 合法 | 🔶 部分：ARCHITECTURE/BENCHMARKS/TASKS 已同步 T5；`API.md` 为剩余项 |
+| **C7 文档完整性** | `ALGORITHMS.md` 每个模块条目齐备 4 列：**来源论文/项目 + 链接 + 选型理由 + 我们的超越**；`README.md` 含徽章 + 5 分钟快速上手 + 实测数字；`API.md` 覆盖全部公开函数签名；`BENCHMARKS.md` 含完整数据表；`CITATION.cff` 合法 | ✅ `docs/API.md` 已交付（15 节：全部公开模块签名表 + 11 条契约陷阱 + 30 秒上手；签名经 `inspect` 抽查核对）；ARCHITECTURE/BENCHMARKS/TASKS 已同步 T5。`CITATION.cff` 🔜 |
 | **C8 P1 收尾** | `convert/hf_export.py` 能把 `.phos` 导出为 HF 格式（`transformers` 可 `from_pretrained`）；`README` 教程在干净 venv 中 5 分钟跑通（`setup.sh` → `tokenize` → `train --steps 500` → `quantize` → `generate`） | 🔜 未开工（P1） |
 
 ### 关键实现要点

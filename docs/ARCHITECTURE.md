@@ -265,6 +265,7 @@ phosphorus/
 └── docs/
     ├── ARCHITECTURE.md                # 本文
     ├── ALGORITHMS.md                  # 借鉴来源 + 超越点
+    ├── API.md                         # 公开 API 参考（签名 + 契约陷阱）
     ├── TASKS.md                       # 任务分解
     └── BENCHMARKS.md                  # 实测基准（含 T4-A native vs numpy）
 ```

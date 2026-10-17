@@ -74,7 +74,8 @@ python -m phosphorus sched --model ckpt/tiny.phos \
 python -m phosphorus generate --model ckpt/tiny.phos \
     --prompt "To be, or not to be" --max_new_tokens 128 \
     --speculate auto --K 8
-# 实测（tiny.phos, K=8, draft_layers=2, α=0.819）：1.40× 串行吞吐；
+# 实测（tiny.phos 为 3 层微模型：每步前向微秒级、调用开销占主导 → 0.91×，
+# 属投机已知不划算 regime；合成 12 层模型 K=16 → 2.26×，α=1.000）；
 # temperature=0 时投机与串行贪心 token 序列逐位相同（不变量 ②）
 ```
 
@@ -126,6 +127,7 @@ phosphorus/
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 总体架构、`.phos` 字节级格式、内核算法、10 条核心不变量 |
 | [`docs/TASKS.md`](docs/TASKS.md) | T1–T5 任务分解与验收标准 |
 | [`docs/ALGORITHMS.md`](docs/ALGORITHMS.md) | A-1…A-25 算法溯源（来源 / 选型理由 / 我们的超越点 / 许可证） |
+| [`docs/API.md`](docs/API.md) | 公开 API 签名参考 + 契约陷阱（改代码前必读） |
 | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | 全部实测数字（禁止写入未测量值） |
 
 ## 引用
