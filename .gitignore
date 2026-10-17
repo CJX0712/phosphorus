@@ -26,10 +26,13 @@ env/
 # --- Phosphorus 运行产物（默认不入库，靠 Makefile 显式生成）--------------------
 artifacts/
 ckpt/
-benchmarks/results.json
 *.phos
 *.bin
 data/raw/*.bin
+
+# --- 例外：T5-C5/C6 基准数据是显式交付物（可复现、可验证）---------------------
+!benchmarks/results.json
+!benchmarks/pareto.json
 
 # --- 编辑器 / 系统 ------------------------------------------------------------
 .vscode/

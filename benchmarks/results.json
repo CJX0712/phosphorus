@@ -1,0 +1,1401 @@
+{
+  "meta": {
+    "generated_at": "2026-10-18 02:24:04",
+    "env": {
+      "python": "3.12.10",
+      "numpy": "2.5.4",
+      "phosphorus": "0.1.0",
+      "platform": "Windows AMD64 AMD64 Family 25 Model 117 Stepping 2, AuthenticAMD",
+      "cpu_count": 16,
+      "native_kernels": false,
+      "native_reason": "ziglang 未安装：请 `pip install 'phosphorus[native]'`（或 pip install ziglang）"
+    },
+    "args": {
+      "models": [
+        "ckpt/tiny.phos",
+        "ckpt/synthetic_12l.phos"
+      ],
+      "n_new": 32,
+      "quick": false,
+      "repeats": 3,
+      "spec_K": 8,
+      "seq_semantics": "total_length(prompt+n_new)"
+    }
+  },
+  "rows": [
+    {
+      "model": "tiny.phos",
+      "config": "fp32",
+      "backend": "fp32",
+      "spec": false,
+      "batch": 1,
+      "seq": 128,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 32,
+      "seconds": 0.1233,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 0.1738,
+          "ttft_ms": 42.41
+        },
+        {
+          "seconds": 0.0888,
+          "ttft_ms": 11.65
+        },
+        {
+          "seconds": 0.1233,
+          "ttft_ms": 15.8
+        }
+      ],
+      "tokens_per_s": 259.48,
+      "decode_tokens_per_s": 297.61,
+      "ms_per_token": 3.854,
+      "ttft_ms": 15.8,
+      "rss_mb_peak": 77.0,
+      "ppl": 57.5612199521937,
+      "alpha": null,
+      "speedup_vs_fp32": 1.0
+    },
+    {
+      "model": "tiny.phos",
+      "config": "fp32",
+      "backend": "fp32",
+      "spec": false,
+      "batch": 1,
+      "seq": 512,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "skipped",
+      "reason": "max_seq_len=256 < seq=512（prompt=480+生成 32 超出窗口，forward 将静默滑窗截断）"
+    },
+    {
+      "model": "tiny.phos",
+      "config": "fp32",
+      "backend": "fp32",
+      "spec": false,
+      "batch": 4,
+      "seq": 128,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 128,
+      "seconds": 0.4915,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 0.3613,
+          "ttft_ms": 141.14
+        },
+        {
+          "seconds": 0.5319,
+          "ttft_ms": 112.07
+        },
+        {
+          "seconds": 0.4915,
+          "ttft_ms": 208.35
+        }
+      ],
+      "tokens_per_s": 260.42,
+      "decode_tokens_per_s": 452.02,
+      "ms_per_token": 3.84,
+      "ttft_ms": 141.14,
+      "rss_mb_peak": 84.6,
+      "ppl": 57.5612199521937,
+      "alpha": null,
+      "speedup_vs_fp32": 1.0
+    },
+    {
+      "model": "tiny.phos",
+      "config": "fp32",
+      "backend": "fp32",
+      "spec": false,
+      "batch": 4,
+      "seq": 512,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "skipped",
+      "reason": "max_seq_len=256 < seq=512（prompt=480+生成 32 超出窗口，forward 将静默滑窗截断）"
+    },
+    {
+      "model": "tiny.phos",
+      "config": "fp32",
+      "backend": "fp32",
+      "spec": false,
+      "batch": 8,
+      "seq": 128,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 256,
+      "seconds": 0.4111,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 0.5699,
+          "ttft_ms": 184.87
+        },
+        {
+          "seconds": 0.4111,
+          "ttft_ms": 178.35
+        },
+        {
+          "seconds": 0.26,
+          "ttft_ms": 58.13
+        }
+      ],
+      "tokens_per_s": 622.71,
+      "decode_tokens_per_s": 1099.87,
+      "ms_per_token": 1.606,
+      "ttft_ms": 178.35,
+      "rss_mb_peak": 96.5,
+      "ppl": 57.5612199521937,
+      "alpha": null,
+      "speedup_vs_fp32": 1.0
+    },
+    {
+      "model": "tiny.phos",
+      "config": "fp32",
+      "backend": "fp32",
+      "spec": false,
+      "batch": 8,
+      "seq": 512,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "skipped",
+      "reason": "max_seq_len=256 < seq=512（prompt=480+生成 32 超出窗口，forward 将静默滑窗截断）"
+    },
+    {
+      "model": "tiny.phos",
+      "config": "int8",
+      "backend": "int8",
+      "spec": false,
+      "batch": 1,
+      "seq": 128,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 32,
+      "seconds": 0.227,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 0.227,
+          "ttft_ms": 62.25
+        },
+        {
+          "seconds": 0.2228,
+          "ttft_ms": 52.9
+        },
+        {
+          "seconds": 0.231,
+          "ttft_ms": 61.68
+        }
+      ],
+      "tokens_per_s": 140.94,
+      "decode_tokens_per_s": 188.99,
+      "ms_per_token": 7.095,
+      "ttft_ms": 61.68,
+      "rss_mb_peak": 98.0,
+      "ppl": 57.56845716544723,
+      "alpha": null,
+      "speedup_vs_fp32": 0.543
+    },
+    {
+      "model": "tiny.phos",
+      "config": "int8",
+      "backend": "int8",
+      "spec": false,
+      "batch": 1,
+      "seq": 512,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "skipped",
+      "reason": "max_seq_len=256 < seq=512（prompt=480+生成 32 超出窗口，forward 将静默滑窗截断）"
+    },
+    {
+      "model": "tiny.phos",
+      "config": "int8",
+      "backend": "int8",
+      "spec": false,
+      "batch": 4,
+      "seq": 128,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 128,
+      "seconds": 0.4705,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 0.4705,
+          "ttft_ms": 198.06
+        },
+        {
+          "seconds": 0.4892,
+          "ttft_ms": 193.73
+        },
+        {
+          "seconds": 0.4311,
+          "ttft_ms": 187.18
+        }
+      ],
+      "tokens_per_s": 272.04,
+      "decode_tokens_per_s": 469.8,
+      "ms_per_token": 3.676,
+      "ttft_ms": 193.73,
+      "rss_mb_peak": 101.1,
+      "ppl": 57.56845716544723,
+      "alpha": null,
+      "speedup_vs_fp32": 1.045
+    },
+    {
+      "model": "tiny.phos",
+      "config": "int8",
+      "backend": "int8",
+      "spec": false,
+      "batch": 4,
+      "seq": 512,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "skipped",
+      "reason": "max_seq_len=256 < seq=512（prompt=480+生成 32 超出窗口，forward 将静默滑窗截断）"
+    },
+    {
+      "model": "tiny.phos",
+      "config": "int8",
+      "backend": "int8",
+      "spec": false,
+      "batch": 8,
+      "seq": 128,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 256,
+      "seconds": 0.744,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 0.7378,
+          "ttft_ms": 406.41
+        },
+        {
+          "seconds": 0.9048,
+          "ttft_ms": 435.17
+        },
+        {
+          "seconds": 0.744,
+          "ttft_ms": 412.78
+        }
+      ],
+      "tokens_per_s": 344.08,
+      "decode_tokens_per_s": 772.45,
+      "ms_per_token": 2.906,
+      "ttft_ms": 412.78,
+      "rss_mb_peak": 112.7,
+      "ppl": 57.56845716544723,
+      "alpha": null,
+      "speedup_vs_fp32": 0.553
+    },
+    {
+      "model": "tiny.phos",
+      "config": "int8",
+      "backend": "int8",
+      "spec": false,
+      "batch": 8,
+      "seq": 512,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "skipped",
+      "reason": "max_seq_len=256 < seq=512（prompt=480+生成 32 超出窗口，forward 将静默滑窗截断）"
+    },
+    {
+      "model": "tiny.phos",
+      "config": "tl",
+      "backend": "tl",
+      "spec": false,
+      "batch": 1,
+      "seq": 128,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 32,
+      "seconds": 0.5317,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 0.5317,
+          "ttft_ms": 261.77
+        },
+        {
+          "seconds": 0.5454,
+          "ttft_ms": 243.33
+        },
+        {
+          "seconds": 0.4554,
+          "ttft_ms": 308.39
+        }
+      ],
+      "tokens_per_s": 60.18,
+      "decode_tokens_per_s": 118.53,
+      "ms_per_token": 16.617,
+      "ttft_ms": 261.77,
+      "rss_mb_peak": 113.9,
+      "ppl": 57.56895886124994,
+      "alpha": null,
+      "speedup_vs_fp32": 0.232
+    },
+    {
+      "model": "tiny.phos",
+      "config": "tl",
+      "backend": "tl",
+      "spec": false,
+      "batch": 1,
+      "seq": 512,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "skipped",
+      "reason": "max_seq_len=256 < seq=512（prompt=480+生成 32 超出窗口，forward 将静默滑窗截断）"
+    },
+    {
+      "model": "tiny.phos",
+      "config": "tl",
+      "backend": "tl",
+      "spec": false,
+      "batch": 4,
+      "seq": 128,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 128,
+      "seconds": 1.362,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 1.1671,
+          "ttft_ms": 700.9
+        },
+        {
+          "seconds": 1.362,
+          "ttft_ms": 995.21
+        },
+        {
+          "seconds": 1.3708,
+          "ttft_ms": 885.98
+        }
+      ],
+      "tokens_per_s": 93.98,
+      "decode_tokens_per_s": 274.58,
+      "ms_per_token": 10.641,
+      "ttft_ms": 885.98,
+      "rss_mb_peak": 121.2,
+      "ppl": 57.56895886124994,
+      "alpha": null,
+      "speedup_vs_fp32": 0.361
+    },
+    {
+      "model": "tiny.phos",
+      "config": "tl",
+      "backend": "tl",
+      "spec": false,
+      "batch": 4,
+      "seq": 512,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "skipped",
+      "reason": "max_seq_len=256 < seq=512（prompt=480+生成 32 超出窗口，forward 将静默滑窗截断）"
+    },
+    {
+      "model": "tiny.phos",
+      "config": "tl",
+      "backend": "tl",
+      "spec": false,
+      "batch": 8,
+      "seq": 128,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 256,
+      "seconds": 2.1559,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 2.3141,
+          "ttft_ms": 1698.85
+        },
+        {
+          "seconds": 2.0906,
+          "ttft_ms": 1446.85
+        },
+        {
+          "seconds": 2.1559,
+          "ttft_ms": 1528.03
+        }
+      ],
+      "tokens_per_s": 118.74,
+      "decode_tokens_per_s": 407.71,
+      "ms_per_token": 8.422,
+      "ttft_ms": 1528.03,
+      "rss_mb_peak": 129.3,
+      "ppl": 57.56895886124994,
+      "alpha": null,
+      "speedup_vs_fp32": 0.191
+    },
+    {
+      "model": "tiny.phos",
+      "config": "tl",
+      "backend": "tl",
+      "spec": false,
+      "batch": 8,
+      "seq": 512,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "skipped",
+      "reason": "max_seq_len=256 < seq=512（prompt=480+生成 32 超出窗口，forward 将静默滑窗截断）"
+    },
+    {
+      "model": "tiny.phos",
+      "config": "tl+spec",
+      "backend": "tl",
+      "spec": true,
+      "batch": 1,
+      "seq": 128,
+      "n_new": 32,
+      "draft_layers": 2,
+      "K": 8,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 36,
+      "seconds": 0.5857,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 0.5147,
+          "ttft_ms": 368.47
+        },
+        {
+          "seconds": 0.6956,
+          "ttft_ms": 435.18
+        },
+        {
+          "seconds": 0.5857,
+          "ttft_ms": 410.44
+        }
+      ],
+      "tokens_per_s": 61.47,
+      "decode_tokens_per_s": 205.44,
+      "ms_per_token": 16.269,
+      "ttft_ms": 410.44,
+      "rss_mb_peak": 129.3,
+      "ppl": 57.56895886124994,
+      "alpha": 1.0,
+      "speedup_vs_fp32": 0.237
+    },
+    {
+      "model": "tiny.phos",
+      "config": "tl+spec",
+      "backend": "tl",
+      "spec": true,
+      "batch": 1,
+      "seq": 512,
+      "n_new": 32,
+      "draft_layers": 2,
+      "K": 8,
+      "status": "skipped",
+      "reason": "max_seq_len=256 < seq=512（prompt=480+生成 32 超出窗口，forward 将静默滑窗截断）"
+    },
+    {
+      "model": "tiny.phos",
+      "config": "tl+spec",
+      "backend": "tl",
+      "spec": true,
+      "batch": 4,
+      "seq": 128,
+      "n_new": 32,
+      "draft_layers": 2,
+      "K": 8,
+      "status": "skipped",
+      "reason": "投机解码当前仅支持单序列（T5 范围）；batch+spec 组合为后续工作"
+    },
+    {
+      "model": "tiny.phos",
+      "config": "tl+spec",
+      "backend": "tl",
+      "spec": true,
+      "batch": 4,
+      "seq": 512,
+      "n_new": 32,
+      "draft_layers": 2,
+      "K": 8,
+      "status": "skipped",
+      "reason": "max_seq_len=256 < seq=512（prompt=480+生成 32 超出窗口，forward 将静默滑窗截断）"
+    },
+    {
+      "model": "tiny.phos",
+      "config": "tl+spec",
+      "backend": "tl",
+      "spec": true,
+      "batch": 8,
+      "seq": 128,
+      "n_new": 32,
+      "draft_layers": 2,
+      "K": 8,
+      "status": "skipped",
+      "reason": "投机解码当前仅支持单序列（T5 范围）；batch+spec 组合为后续工作"
+    },
+    {
+      "model": "tiny.phos",
+      "config": "tl+spec",
+      "backend": "tl",
+      "spec": true,
+      "batch": 8,
+      "seq": 512,
+      "n_new": 32,
+      "draft_layers": 2,
+      "K": 8,
+      "status": "skipped",
+      "reason": "max_seq_len=256 < seq=512（prompt=480+生成 32 超出窗口，forward 将静默滑窗截断）"
+    },
+    {
+      "model": "synthetic_12l.phos",
+      "config": "fp32",
+      "backend": "fp32",
+      "spec": false,
+      "batch": 1,
+      "seq": 128,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 32,
+      "seconds": 4.2433,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 4.9869,
+          "ttft_ms": 259.23
+        },
+        {
+          "seconds": 4.2433,
+          "ttft_ms": 361.32
+        },
+        {
+          "seconds": 3.7131,
+          "ttft_ms": 365.7
+        }
+      ],
+      "tokens_per_s": 7.54,
+      "decode_tokens_per_s": 8.24,
+      "ms_per_token": 132.603,
+      "ttft_ms": 361.32,
+      "rss_mb_peak": 262.4,
+      "ppl": null,
+      "alpha": null,
+      "speedup_vs_fp32": 1.0
+    },
+    {
+      "model": "synthetic_12l.phos",
+      "config": "fp32",
+      "backend": "fp32",
+      "spec": false,
+      "batch": 1,
+      "seq": 512,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 32,
+      "seconds": 5.9161,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 4.7355,
+          "ttft_ms": 1217.52
+        },
+        {
+          "seconds": 5.9161,
+          "ttft_ms": 1151.13
+        },
+        {
+          "seconds": 6.135,
+          "ttft_ms": 2168.8
+        }
+      ],
+      "tokens_per_s": 5.41,
+      "decode_tokens_per_s": 8.07,
+      "ms_per_token": 184.88,
+      "ttft_ms": 1217.52,
+      "rss_mb_peak": 300.0,
+      "ppl": null,
+      "alpha": null,
+      "speedup_vs_fp32": 1.0
+    },
+    {
+      "model": "synthetic_12l.phos",
+      "config": "fp32",
+      "backend": "fp32",
+      "spec": false,
+      "batch": 4,
+      "seq": 128,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 128,
+      "seconds": 5.4373,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 5.2762,
+          "ttft_ms": 766.57
+        },
+        {
+          "seconds": 5.4373,
+          "ttft_ms": 693.61
+        },
+        {
+          "seconds": 6.5811,
+          "ttft_ms": 885.53
+        }
+      ],
+      "tokens_per_s": 23.54,
+      "decode_tokens_per_s": 26.98,
+      "ms_per_token": 42.479,
+      "ttft_ms": 766.57,
+      "rss_mb_peak": 300.0,
+      "ppl": null,
+      "alpha": null,
+      "speedup_vs_fp32": 1.0
+    },
+    {
+      "model": "synthetic_12l.phos",
+      "config": "fp32",
+      "backend": "fp32",
+      "spec": false,
+      "batch": 4,
+      "seq": 512,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 128,
+      "seconds": 8.0919,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 8.0846,
+          "ttft_ms": 2447.72
+        },
+        {
+          "seconds": 9.9982,
+          "ttft_ms": 3597.97
+        },
+        {
+          "seconds": 8.0919,
+          "ttft_ms": 2918.19
+        }
+      ],
+      "tokens_per_s": 15.82,
+      "decode_tokens_per_s": 22.71,
+      "ms_per_token": 63.218,
+      "ttft_ms": 2918.19,
+      "rss_mb_peak": 333.5,
+      "ppl": null,
+      "alpha": null,
+      "speedup_vs_fp32": 1.0
+    },
+    {
+      "model": "synthetic_12l.phos",
+      "config": "fp32",
+      "backend": "fp32",
+      "spec": false,
+      "batch": 8,
+      "seq": 128,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 256,
+      "seconds": 6.4262,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 6.7445,
+          "ttft_ms": 997.51
+        },
+        {
+          "seconds": 6.4262,
+          "ttft_ms": 1357.54
+        },
+        {
+          "seconds": 5.577,
+          "ttft_ms": 1356.27
+        }
+      ],
+      "tokens_per_s": 39.84,
+      "decode_tokens_per_s": 50.51,
+      "ms_per_token": 25.102,
+      "ttft_ms": 1356.27,
+      "rss_mb_peak": 333.5,
+      "ppl": null,
+      "alpha": null,
+      "speedup_vs_fp32": 1.0
+    },
+    {
+      "model": "synthetic_12l.phos",
+      "config": "fp32",
+      "backend": "fp32",
+      "spec": false,
+      "batch": 8,
+      "seq": 512,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 256,
+      "seconds": 13.1323,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 14.6161,
+          "ttft_ms": 6997.02
+        },
+        {
+          "seconds": 13.1323,
+          "ttft_ms": 5144.41
+        },
+        {
+          "seconds": 12.2938,
+          "ttft_ms": 5082.25
+        }
+      ],
+      "tokens_per_s": 19.49,
+      "decode_tokens_per_s": 33.6,
+      "ms_per_token": 51.298,
+      "ttft_ms": 5144.41,
+      "rss_mb_peak": 409.5,
+      "ppl": null,
+      "alpha": null,
+      "speedup_vs_fp32": 1.0
+    },
+    {
+      "model": "synthetic_12l.phos",
+      "config": "int8",
+      "backend": "int8",
+      "spec": false,
+      "batch": 1,
+      "seq": 128,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 32,
+      "seconds": 11.7146,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 12.4868,
+          "ttft_ms": 1941.55
+        },
+        {
+          "seconds": 11.7146,
+          "ttft_ms": 1775.87
+        },
+        {
+          "seconds": 10.9876,
+          "ttft_ms": 2009.51
+        }
+      ],
+      "tokens_per_s": 2.73,
+      "decode_tokens_per_s": 3.22,
+      "ms_per_token": 366.082,
+      "ttft_ms": 1941.55,
+      "rss_mb_peak": 409.5,
+      "ppl": null,
+      "alpha": null,
+      "speedup_vs_fp32": 0.362
+    },
+    {
+      "model": "synthetic_12l.phos",
+      "config": "int8",
+      "backend": "int8",
+      "spec": false,
+      "batch": 1,
+      "seq": 512,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 32,
+      "seconds": 17.9618,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 17.2944,
+          "ttft_ms": 8112.31
+        },
+        {
+          "seconds": 18.1699,
+          "ttft_ms": 8432.4
+        },
+        {
+          "seconds": 17.9618,
+          "ttft_ms": 8849.1
+        }
+      ],
+      "tokens_per_s": 1.78,
+      "decode_tokens_per_s": 3.49,
+      "ms_per_token": 561.305,
+      "ttft_ms": 8432.4,
+      "rss_mb_peak": 409.5,
+      "ppl": null,
+      "alpha": null,
+      "speedup_vs_fp32": 0.329
+    },
+    {
+      "model": "synthetic_12l.phos",
+      "config": "int8",
+      "backend": "int8",
+      "spec": false,
+      "batch": 4,
+      "seq": 128,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 128,
+      "seconds": 18.0118,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 17.8443,
+          "ttft_ms": 6533.37
+        },
+        {
+          "seconds": 19.09,
+          "ttft_ms": 6464.78
+        },
+        {
+          "seconds": 18.0118,
+          "ttft_ms": 6127.87
+        }
+      ],
+      "tokens_per_s": 7.11,
+      "decode_tokens_per_s": 10.77,
+      "ms_per_token": 140.717,
+      "ttft_ms": 6464.78,
+      "rss_mb_peak": 409.5,
+      "ppl": null,
+      "alpha": null,
+      "speedup_vs_fp32": 0.302
+    },
+    {
+      "model": "synthetic_12l.phos",
+      "config": "int8",
+      "backend": "int8",
+      "spec": false,
+      "batch": 4,
+      "seq": 512,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 128,
+      "seconds": 42.6755,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 42.6755,
+          "ttft_ms": 29843.74
+        },
+        {
+          "seconds": 42.0749,
+          "ttft_ms": 29926.84
+        },
+        {
+          "seconds": 43.3446,
+          "ttft_ms": 30392.71
+        }
+      ],
+      "tokens_per_s": 3.0,
+      "decode_tokens_per_s": 9.98,
+      "ms_per_token": 333.403,
+      "ttft_ms": 29926.84,
+      "rss_mb_peak": 409.5,
+      "ppl": null,
+      "alpha": null,
+      "speedup_vs_fp32": 0.19
+    },
+    {
+      "model": "synthetic_12l.phos",
+      "config": "int8",
+      "backend": "int8",
+      "spec": false,
+      "batch": 8,
+      "seq": 128,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 256,
+      "seconds": 25.574,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 25.574,
+          "ttft_ms": 11553.96
+        },
+        {
+          "seconds": 26.7209,
+          "ttft_ms": 11658.02
+        },
+        {
+          "seconds": 24.9081,
+          "ttft_ms": 10848.54
+        }
+      ],
+      "tokens_per_s": 10.01,
+      "decode_tokens_per_s": 18.21,
+      "ms_per_token": 99.898,
+      "ttft_ms": 11553.96,
+      "rss_mb_peak": 409.5,
+      "ppl": null,
+      "alpha": null,
+      "speedup_vs_fp32": 0.251
+    },
+    {
+      "model": "synthetic_12l.phos",
+      "config": "int8",
+      "backend": "int8",
+      "spec": false,
+      "batch": 8,
+      "seq": 512,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 256,
+      "seconds": 78.6113,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 78.6113,
+          "ttft_ms": 63996.27
+        },
+        {
+          "seconds": 79.3018,
+          "ttft_ms": 64664.0
+        },
+        {
+          "seconds": 78.463,
+          "ttft_ms": 61012.72
+        }
+      ],
+      "tokens_per_s": 3.26,
+      "decode_tokens_per_s": 17.49,
+      "ms_per_token": 307.075,
+      "ttft_ms": 63996.27,
+      "rss_mb_peak": 440.2,
+      "ppl": null,
+      "alpha": null,
+      "speedup_vs_fp32": 0.167
+    },
+    {
+      "model": "synthetic_12l.phos",
+      "config": "tl",
+      "backend": "tl",
+      "spec": false,
+      "batch": 1,
+      "seq": 128,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 32,
+      "seconds": 7.8835,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 8.5734,
+          "ttft_ms": 5335.76
+        },
+        {
+          "seconds": 7.2908,
+          "ttft_ms": 4540.64
+        },
+        {
+          "seconds": 7.8835,
+          "ttft_ms": 4051.48
+        }
+      ],
+      "tokens_per_s": 4.06,
+      "decode_tokens_per_s": 9.88,
+      "ms_per_token": 246.361,
+      "ttft_ms": 4540.64,
+      "rss_mb_peak": 440.2,
+      "ppl": null,
+      "alpha": null,
+      "speedup_vs_fp32": 0.538
+    },
+    {
+      "model": "synthetic_12l.phos",
+      "config": "tl",
+      "backend": "tl",
+      "spec": false,
+      "batch": 1,
+      "seq": 512,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 32,
+      "seconds": 26.5298,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 24.9162,
+          "ttft_ms": 21747.54
+        },
+        {
+          "seconds": 26.9081,
+          "ttft_ms": 22113.03
+        },
+        {
+          "seconds": 26.5298,
+          "ttft_ms": 23089.71
+        }
+      ],
+      "tokens_per_s": 1.21,
+      "decode_tokens_per_s": 9.3,
+      "ms_per_token": 829.057,
+      "ttft_ms": 22113.03,
+      "rss_mb_peak": 440.2,
+      "ppl": null,
+      "alpha": null,
+      "speedup_vs_fp32": 0.223
+    },
+    {
+      "model": "synthetic_12l.phos",
+      "config": "tl",
+      "backend": "tl",
+      "spec": false,
+      "batch": 4,
+      "seq": 128,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 128,
+      "seconds": 31.4963,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 35.8053,
+          "ttft_ms": 22767.82
+        },
+        {
+          "seconds": 31.4316,
+          "ttft_ms": 20029.11
+        },
+        {
+          "seconds": 31.4963,
+          "ttft_ms": 22488.68
+        }
+      ],
+      "tokens_per_s": 4.06,
+      "decode_tokens_per_s": 11.23,
+      "ms_per_token": 246.065,
+      "ttft_ms": 22488.68,
+      "rss_mb_peak": 440.2,
+      "ppl": null,
+      "alpha": null,
+      "speedup_vs_fp32": 0.173
+    },
+    {
+      "model": "synthetic_12l.phos",
+      "config": "tl",
+      "backend": "tl",
+      "spec": false,
+      "batch": 4,
+      "seq": 512,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 128,
+      "seconds": 83.5799,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 101.098,
+          "ttft_ms": 94207.93
+        },
+        {
+          "seconds": 83.3331,
+          "ttft_ms": 76633.14
+        },
+        {
+          "seconds": 83.5799,
+          "ttft_ms": 75794.24
+        }
+      ],
+      "tokens_per_s": 1.53,
+      "decode_tokens_per_s": 18.58,
+      "ms_per_token": 652.968,
+      "ttft_ms": 76633.14,
+      "rss_mb_peak": 440.2,
+      "ppl": null,
+      "alpha": null,
+      "speedup_vs_fp32": 0.097
+    },
+    {
+      "model": "synthetic_12l.phos",
+      "config": "tl",
+      "backend": "tl",
+      "spec": false,
+      "batch": 8,
+      "seq": 128,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 256,
+      "seconds": 43.5335,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 42.0311,
+          "ttft_ms": 30276.48
+        },
+        {
+          "seconds": 43.5335,
+          "ttft_ms": 30759.45
+        },
+        {
+          "seconds": 44.4652,
+          "ttft_ms": 30273.86
+        }
+      ],
+      "tokens_per_s": 5.88,
+      "decode_tokens_per_s": 20.04,
+      "ms_per_token": 170.053,
+      "ttft_ms": 30276.48,
+      "rss_mb_peak": 440.2,
+      "ppl": null,
+      "alpha": null,
+      "speedup_vs_fp32": 0.148
+    },
+    {
+      "model": "synthetic_12l.phos",
+      "config": "tl",
+      "backend": "tl",
+      "spec": false,
+      "batch": 8,
+      "seq": 512,
+      "n_new": 32,
+      "draft_layers": null,
+      "K": null,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 256,
+      "seconds": 202.6648,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 206.4863,
+          "ttft_ms": 191403.97
+        },
+        {
+          "seconds": 202.6648,
+          "ttft_ms": 186375.36
+        },
+        {
+          "seconds": 191.8897,
+          "ttft_ms": 179079.31
+        }
+      ],
+      "tokens_per_s": 1.26,
+      "decode_tokens_per_s": 16.97,
+      "ms_per_token": 791.659,
+      "ttft_ms": 186375.36,
+      "rss_mb_peak": 440.2,
+      "ppl": null,
+      "alpha": null,
+      "speedup_vs_fp32": 0.065
+    },
+    {
+      "model": "synthetic_12l.phos",
+      "config": "tl+spec",
+      "backend": "tl",
+      "spec": true,
+      "batch": 1,
+      "seq": 128,
+      "n_new": 32,
+      "draft_layers": 11,
+      "K": 8,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 36,
+      "seconds": 12.1764,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 12.1984,
+          "ttft_ms": 8887.71
+        },
+        {
+          "seconds": 12.1764,
+          "ttft_ms": 8731.66
+        },
+        {
+          "seconds": 11.2373,
+          "ttft_ms": 8015.87
+        }
+      ],
+      "tokens_per_s": 2.96,
+      "decode_tokens_per_s": 10.87,
+      "ms_per_token": 338.234,
+      "ttft_ms": 8731.66,
+      "rss_mb_peak": 440.2,
+      "ppl": null,
+      "alpha": 1.0,
+      "speedup_vs_fp32": 0.392
+    },
+    {
+      "model": "synthetic_12l.phos",
+      "config": "tl+spec",
+      "backend": "tl",
+      "spec": true,
+      "batch": 1,
+      "seq": 512,
+      "n_new": 32,
+      "draft_layers": 11,
+      "K": 8,
+      "status": "ok",
+      "reason": null,
+      "tokens_generated": 33,
+      "seconds": 40.6561,
+      "repeats": 3,
+      "raw_timings": [
+        {
+          "seconds": 40.6561,
+          "ttft_ms": 36855.49
+        },
+        {
+          "seconds": 40.9383,
+          "ttft_ms": 37568.11
+        },
+        {
+          "seconds": 40.3272,
+          "ttft_ms": 36739.76
+        }
+      ],
+      "tokens_per_s": 0.81,
+      "decode_tokens_per_s": 9.2,
+      "ms_per_token": 1232.004,
+      "ttft_ms": 36855.49,
+      "rss_mb_peak": 440.2,
+      "ppl": null,
+      "alpha": 0.9062,
+      "speedup_vs_fp32": 0.15
+    },
+    {
+      "model": "synthetic_12l.phos",
+      "config": "tl+spec",
+      "backend": "tl",
+      "spec": true,
+      "batch": 4,
+      "seq": 128,
+      "n_new": 32,
+      "draft_layers": 11,
+      "K": 8,
+      "status": "skipped",
+      "reason": "投机解码当前仅支持单序列（T5 范围）；batch+spec 组合为后续工作"
+    },
+    {
+      "model": "synthetic_12l.phos",
+      "config": "tl+spec",
+      "backend": "tl",
+      "spec": true,
+      "batch": 4,
+      "seq": 512,
+      "n_new": 32,
+      "draft_layers": 11,
+      "K": 8,
+      "status": "skipped",
+      "reason": "投机解码当前仅支持单序列（T5 范围）；batch+spec 组合为后续工作"
+    },
+    {
+      "model": "synthetic_12l.phos",
+      "config": "tl+spec",
+      "backend": "tl",
+      "spec": true,
+      "batch": 8,
+      "seq": 128,
+      "n_new": 32,
+      "draft_layers": 11,
+      "K": 8,
+      "status": "skipped",
+      "reason": "投机解码当前仅支持单序列（T5 范围）；batch+spec 组合为后续工作"
+    },
+    {
+      "model": "synthetic_12l.phos",
+      "config": "tl+spec",
+      "backend": "tl",
+      "spec": true,
+      "batch": 8,
+      "seq": 512,
+      "n_new": 32,
+      "draft_layers": 11,
+      "K": 8,
+      "status": "skipped",
+      "reason": "投机解码当前仅支持单序列（T5 范围）；batch+spec 组合为后续工作"
+    }
+  ]
+}

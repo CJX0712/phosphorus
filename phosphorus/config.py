@@ -174,7 +174,9 @@ class QuantConfig:
     a_granularity: Granularity = Granularity.PER_TOKEN
     block_size: int = 128
     a_bits: int = 8
-    # O3：HGF 低秩校正秩 r（0 = 关闭）。默认 4 ≈ 15% 额外内存。
+    # O3：HGF 低秩校正秩 r（0 = 关闭）。额外内存 = 48·r·(in+out)/(5·in·out) 倍三值
+    # 打包字节（f16 因子 vs 5-bit 打包）——**架构相关**：d=512 时 r=4 ≈ 15%，
+    # d=192 时 r=4 ≈ 36%（实测见 benchmarks/pareto.md）。勿引用单一常数。
     hgf_rank: int = 4
     hgf_alpha: float = 1.0
     hgf_gate_init: float = 0.05

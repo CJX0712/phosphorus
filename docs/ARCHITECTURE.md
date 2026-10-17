@@ -64,7 +64,7 @@
 | 连续批处理调度器 | `phosphorus/scheduler.py`（`Scheduler` + 波次切分 + greedy/采样生成） | ✅ T4-D（C6 等价 + C7 采样；融合 8 条吞吐 2.35×） |
 | KV 驱逐策略 | `phosphorus/eviction.py`（SnapKV/PyramidKV/H2O/StreamingLLM + 统一保留掩码） | ✅ T4-C（不变量⑦） |
 | `speculate/*`（投机解码） | `phosphorus/speculate/{verify,layerskip,ngram,controller,tree,eagle,medusa,base}.py` + `engine.truncate_tail/shadow` + `speculate.generate_tokens` 热 KV 主循环 | ✅ T5（C1★ 分布等价 + C2 零额外字节 + C4 控制器；C3/C5/C6 见 BENCHMARKS §T5） |
-| `bench/*` | `scripts/bench_speculate.py`（吞吐矩阵）+ `scripts/build_synthetic_model.py`（regime 演示模型） | ✅ T5-C5/C6 |
+| `bench/*` | `scripts/bench_speculate.py`（吞吐矩阵）+ `scripts/bench_matrix.py`（C5 全基准矩阵）+ `scripts/bench_pareto.py`（C6 HGF Pareto）+ `scripts/build_synthetic_model.py`（regime 演示模型） | ✅ T5-C5/C6 |
 | `convert/*` | HF 导入/导出 | 🔜 T5-C8（P1） |
 
 ---
@@ -197,7 +197,10 @@ phosphorus/
 │   ├── bench_native.py                # T4-A 端到端基准（native vs numpy）
 │   ├── measure_eviction.py            # T4-C 驱逐策略质量基准（下游 logits 余弦）
 │   ├── bench_speculate.py             # T5 投机解码吞吐矩阵（C3/C5/C6）
+│   ├── bench_matrix.py                # T5-C5 全基准矩阵（24 组 + results.json + REPORT.md）
+│   ├── bench_pareto.py                # T5-C6 HGF Pareto 扫描（ranks 0..16 → pareto.json/md）
 │   └── build_synthetic_model.py       # T5 合成深层模型构造（加速比 regime 演示）
+├── benchmarks/                        # 基准产物（results.json / REPORT.md / pareto.*）
 ├── .github/workflows/ci.yml           # ubuntu-latest, py3.10/3.11/3.12
 ├── phosphorus/                        # 扁平包（T1–T5 已落地；无 model/ quantize/ kernels/ 子包）
 │   ├── __init__.py                    # __version__, backend 探测
@@ -299,6 +302,7 @@ phosphorus/
 | `phosphorus/speculate/tree.py` | 树状草稿：平衡树构建 + 祖先因果掩码 + 概率剪枝 | `TreeSpec`, `build_balanced_tree` | ✅ T5 |
 | `phosphorus/speculate/__init__.py` | 热 KV 增量投机主循环：双 cache 草稿/验证 + `truncate_tail` 拒绝回滚 | `generate_tokens` | ✅ T5-C3 机制 |
 | `scripts/bench_speculate.py` | 投机解码吞吐矩阵（K × draft_layers × seeds，含接受率 α） | — | ✅ T5-C5/C6 |
+| `scripts/bench_matrix.py` | T5-C5 全基准矩阵（`{fp32,int8,tl,tl+spec} × batch{1,4,8} × seq{128,512}` → `benchmarks/results.json` + `REPORT.md` + ASCII 图） | — | ✅ T5-C5 |
 | `convert/*` | HF 导入/导出 | — | 🔜 T5-C8（P1） |
 | `convert.hf_*` | HF `transformers` ↔ `.phos` / ckpt 互转 | safetensors | 目标格式 | `import_hf()`, `export_hf()` |
 

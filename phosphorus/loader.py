@@ -54,7 +54,8 @@ class PhosFile:
     属性：
         weights: name -> ndarray（三值权重为 int8，其余为 float32）
         scales:  name -> float32（per-channel 缩放，仅三值权重）
-        hgf:     name -> (A f16 [r,in], B f16 [out,r], gate float)
+        hgf:     name -> (A f32 [r,in], B f32 [out,r], gate float)
+                 （.phos 文件中为 f16，载入时升为 f32 供计算）
         tokenizer: 分词器（若文件带 tokenizer blob）
         header:  解析后的 header 字典（含结构超参与量化配置）
         raw:     三值张量的**原始 5-bit 打包字节**（供 TL 后端直接查 LUT，

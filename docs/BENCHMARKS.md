@@ -320,6 +320,65 @@ python -m scripts.bench_speculate --model ckpt/synthetic_12l.phos --tokens 192 -
     --K 4,8,16 --draft-layers 3
 ```
 
+### 5.7 T5-C5：全基准矩阵（实测）
+
+`scripts/bench_matrix.py` → `benchmarks/results.json` + `benchmarks/REPORT.md`（Markdown 表 +
+ASCII 柱状图）。矩阵 `{fp32, int8, tl, tl+spec} × batch ∈ {1,4,8} × seq ∈ {128,512}` 共 48 组
+（2 模型 × 24），**30 组 ok / 18 组 skipped**（跳过原因见表末，无估算数字）。
+
+口径：**seq = 序列总长**（prompt = seq − 32，生成 32）；greedy（temperature=0）确定性；
+每组 3 次取**中位数**（本机单次采样抖动实测达 ±35%，raw_timings 全量在 results.json）；
+speedup = 相对同 (batch, seq) 的 fp32 基线；**native C99 内核不可用**（ziglang 未安装，
+即默认 `pip install phosphorus` 用户体验）→ tl/int8 走 numpy 回退路径。
+
+**tiny.phos（d=192, 3 层，seq=128，端到端 tok/s）**
+
+| 配置 | b=1 | b=4 | b=8 | 解读 |
+|---|---:|---:|---:|---|
+| fp32 | 259.5 | 260.4 | **622.7** | 连续批处理 **2.40×**（b8/b1） |
+| int8 | 140.9 | 272.0 | 344.1 | b1 量化开销 > 收益（微模型），b8 仍不及 fp32 |
+| tl | 60.2 | 94.0 | 118.7 | numpy 回退逐 token 循环，比 fp32 BLAS 慢 4–6× |
+| tl+spec（K=8, dl=2, α=1.000） | 61.5 | — | — | 与 tl 串行持平（1.02×），双 cache 预填吃掉收益 |
+
+**synthetic_12l.phos（d=512, 12 层，seq=128，端到端 tok/s）**
+
+| 配置 | b=1 | b=4 | b=8 | 解读 |
+|---|---:|---:|---:|---|
+| fp32 | 7.5 | 23.5 | **39.8** | 连续批处理 **5.31×**（层数深、批摊销更显著） |
+| int8 | 2.7 | 7.1 | 10.0 | 无 native 时 int8 路径常数过大 |
+| tl | 4.1 | 4.1 | 5.9 | 逐 token 循环路径，批处理几乎无收益 |
+| tl+spec（K=8, dl=3, α=1.000） | 3.0 | — | — | **0.73×**——见下方机制分析 |
+
+seq=512（synthetic_12l）：fp32 5.4 / 15.8 / 19.5；int8 1.8 / 3.0 / 3.3；
+tl 1.2 / 1.5 / 1.3；tl+spec 0.8（α=0.906，长上下文接受率略降）。
+
+**三条机制级结论（实测互证）**：
+
+1. **连续批处理是默认安装下的最大杠杆**：fp32 b8/b1 = 2.40×（3 层）→ 5.31×（12 层），
+   且不改变任何数值结果（不变量 ⑨ 同源）。这是 T4-D 融合前向的直接兑现。
+2. **无 native 时 tl/int8 是「慢路径」而非「快路径」**：numpy 回退的 tl 为逐 token
+   Python 循环，在微矩阵上比 fp32 BLAS 慢 4–6×。这不是缺陷而是**回退语义**——
+   部署态必须装 `[native]` extra（§4：native tl 2.8–6.8×）。矩阵如实记录默认安装画像。
+3. **投机解码的收益前提是「批量前向能摊薄调用/循环开销」**：α=1.000 的 synthetic_12l
+   在 tl 回退路径上仍 0.73×（验证 8 位置无法摊销逐 token 循环），而在 fp32 BLAS 路径
+   （§5.6）同 α 下达 2.26×。**同一算法、同一 α，路径不同结论相反**——这是对 §5.6
+   regime 分析的机制级补充：投机的敌人不是 α 低，而是「单次前向成本 ≲ 调用开销」。
+   另：spec 双 cache 预填使 ttft ≈ 2×（tiny 410ms vs tl 262ms），n_new=32 的短生成
+   场景端到端被预填主导——长生成见 §5.6（n_new=256，解码主导）。
+
+**skipped 18 组原因**（诚实记录，不跑假数据）：① tiny.phos `max_seq_len=256 < seq=512`
+（12 组——按 prompt=512 语义会触发 `forward` 静默滑窗截断，指标失真，故矩阵采用
+「总长」口径）；② `tl+spec × batch>1`（6 组——`generate_tokens` 为单序列实现，
+多草稿树 + 连续批处理组合在 T5 范围外，属后续工作）。
+
+**复现**：
+
+```bash
+python scripts/bench_matrix.py                 # 全矩阵（约 35 min，无 native 的 tl 组最慢）
+python scripts/bench_matrix.py --quick         # 只跑 seq=128, batch=1（约 2 min）
+python scripts/bench_matrix.py --report-only benchmarks/results.json   # 仅刷新报告模板
+```
+
 ## 6. 生成样本（实测输出）
 
  prompt `"To be, or not to be"`，采样 160 tokens，temperature 默认：
