@@ -379,6 +379,11 @@ python scripts/bench_matrix.py --quick         # 只跑 seq=128, batch=1（约 2
 python scripts/bench_matrix.py --report-only benchmarks/results.json   # 仅刷新报告模板
 ```
 
+# 等价 CLI 门面（T5 收尾接线；脚本为单一事实来源，bench 子命令仅做委托）
+python -m phosphorus bench --all                          # ≡ bench_matrix.py 全矩阵
+python -m phosphorus bench --all --quick                  # ≡ --quick
+python -m phosphorus bench --all --model ckpt/tiny.phos  # 指定单一模型
+
 ### 5.8 T5-C6：HGF Pareto 扫描（实测 · 诚实判定）
 
 `scripts/bench_pareto.py` → `benchmarks/pareto.json` + `benchmarks/pareto.md`（`--protocol both --ranks 0,1,2,4,8,16 --steps 150`）。
@@ -457,6 +462,9 @@ python scripts/bench_pareto.py --protocol both --ranks 0,1,2,4,8,16 --steps 150
 # 仅 tiny 协议快速冒烟（30 步，2 档）
 python scripts/bench_pareto.py --protocol tiny --ranks 0,4 --steps 30
 ```
+
+# 等价 CLI 门面（T5 收尾接线；脚本为单一事实来源，bench 子命令仅做委托）
+python -m phosphorus bench --pareto --protocol both --ranks 0,1,2,4,8,16 --steps 150
 
 产物：`benchmarks/pareto.json`（全量双口径数据）+ `benchmarks/pareto.md`（表格 + ASCII 曲线）。
 
@@ -564,6 +572,13 @@ python -m scripts.bench_native --model ckpt/tiny.phos --reps 7
 # T4-B 基准（分页 KV vs dense）
 python -m phosphorus bench --model ckpt/tiny.phos --backend tl --kv paged --tokens 64
 python -m phosphorus bench --model ckpt/tiny.phos --backend tl --kv dense --tokens 64
+
+# C5 全基准矩阵（T5 收尾：bench 子命令统一门面，等价于 scripts/bench_matrix.py）
+python -m phosphorus bench --all                # 2 模型 × 24 组 = 48 组（30 ok / 18 skipped）
+python -m phosphorus bench --all --quick        # 只跑 seq=128, batch=1（约 2 min）
+
+# C6 HGF Pareto 扫描（等价于 scripts/bench_pareto.py）
+python -m phosphorus bench --pareto --ranks 0,1,2,4,8,16 --steps 150
 ```
 
 > 注：默认配置（9.4M 模型）面向多核服务器调参；在上述开发机上单步约 4 分钟，

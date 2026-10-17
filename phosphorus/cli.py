@@ -199,10 +199,76 @@ def cmd_sched(a: argparse.Namespace) -> None:
         print(f"\n[bench] {total_tok} 新生成 token / {dt:.3f}s = {tps:.1f} tok/s")
 
 
+# --------------------------------------------------------------------------- #
+# bench 子命令：单次吞吐 / C5 矩阵 / C6 Pareto 三合一                          #
+# --------------------------------------------------------------------------- #
+
+
+def _run_bench_script(script: str, argv: list[str]) -> None:
+    """委托给 scripts/ 下既有基准脚本（C5 矩阵 / C6 Pareto）。
+
+    子进程运行，与 `python scripts/<script> …` 完全一致——脚本即单一事实来源，
+    且不污染 `bench` 单次吞吐路径的零 torch 依赖约束。
+    """
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parent.parent
+    cmd = [sys.executable, str(root / "scripts" / script), *argv]
+    raise SystemExit(subprocess.call(cmd, cwd=root))
+
+
+def _bench_argv_pareto(a: argparse.Namespace) -> list[str]:
+    argv: list[str] = []
+    if a.ranks:
+        argv += ["--ranks", a.ranks]
+    if a.protocol:
+        argv += ["--protocol", a.protocol]
+    if a.steps is not None:
+        argv += ["--steps", str(a.steps)]
+    if a.no_fp32:
+        argv.append("--no-fp32")
+    if a.ckpt_dir:
+        argv += ["--ckpt-dir", a.ckpt_dir]
+    if a.out_dir:
+        argv += ["--out-dir", a.out_dir]
+    return argv
+
+
+def _bench_argv_matrix(a: argparse.Namespace) -> list[str]:
+    argv: list[str] = []
+    if a.model:
+        argv += ["--model", a.model]
+    if a.quick:
+        argv.append("--quick")
+    if a.repeats is not None:
+        argv += ["--repeats", str(a.repeats)]
+    if a.report_only:
+        argv += ["--report-only", a.report_only]
+    if a.n_new is not None:
+        argv += ["--n-new", str(a.n_new)]
+    if a.out_dir:
+        argv += ["--out-dir", a.out_dir]
+    return argv
+
+
 def cmd_bench(a: argparse.Namespace) -> None:
+    # C5 全基准矩阵 / C6 HGF Pareto 扫描：委托既有脚本（文档承诺的验收命令）
+    if getattr(a, "pareto", False):
+        _run_bench_script("bench_pareto.py", _bench_argv_pareto(a))
+        return
+    if getattr(a, "matrix", False):
+        _run_bench_script("bench_matrix.py", _bench_argv_matrix(a))
+        return
+
     import numpy as np
 
     from .engine import PhosModel
+
+    if not a.model:
+        raise SystemExit(
+            "--model 必填（单次吞吐基准）；C5 矩阵用 --all，C6 Pareto 用 --pareto"
+        )
 
     model = PhosModel.from_file(
         a.model,
@@ -350,8 +416,12 @@ def build_parser() -> argparse.ArgumentParser:
     pg.add_argument("--K", type=int, default=4, dest="K", help="投机草稿长度 K（T5，默认 4）")
     pg.set_defaults(func=cmd_generate)
 
-    pb = sub.add_parser("bench", help="推理吞吐基准")
-    pb.add_argument("--model", required=True)
+    pb = sub.add_parser("bench", help="推理吞吐基准 / C5 矩阵 / C6 Pareto")
+    # —— 单次吞吐基准（原有，零 torch 依赖）——
+    pb.add_argument(
+        "--model", default=None,
+        help="模型 .phos 路径（单次基准必填；--all/--pareto 时忽略）",
+    )
     pb.add_argument("--tokens", type=int, default=64)
     pb.add_argument("--prompt-len", type=int, default=8)
     pb.add_argument("--backend", default="fp32", choices=["fp32", "int8", "tl", "i2s"])
@@ -370,6 +440,30 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument(
         "--max-seq", type=int, default=1, dest="max_seqs", help="连续批处理并发序列数（T4-D）"
     )
+    # —— C5 全基准矩阵（scripts/bench_matrix.py）——
+    pb.add_argument(
+        "--all", "--matrix", dest="matrix", action="store_true",
+        help="C5 全基准矩阵：{fp32,int8,ternary,ternary+spec} × batch∈{1,4,8} × seq∈{128,512}",
+    )
+    pb.add_argument("--quick", action="store_true", help="（矩阵）只跑 seq=128, batch=1")
+    pb.add_argument("--repeats", type=int, default=None, help="（矩阵）每组重复次数（默认 3，取中位数）")
+    pb.add_argument(
+        "--report-only", default=None, metavar="RESULTS_JSON",
+        help="（矩阵）从既有 results.json 重新生成 REPORT.md",
+    )
+    pb.add_argument("--n-new", type=int, default=None, help="（矩阵）每组生成 token 数（默认 32）")
+    # —— C6 HGF Pareto 扫描（scripts/bench_pareto.py）——
+    pb.add_argument(
+        "--pareto", action="store_true",
+        help="C6 HGF Pareto 扫描：按 --ranks 各档 r 输出 字节%%/val_ppl/Δppl%% + ASCII 曲线",
+    )
+    pb.add_argument("--ranks", default=None, help="（Pareto）rank 档位列表，如 0,1,2,4,8,16")
+    pb.add_argument("--protocol", default=None, choices=["tiny", "d512", "both"], help="（Pareto）训练协议")
+    pb.add_argument("--steps", type=int, default=None, help="（Pareto）训练步数（默认 150）")
+    pb.add_argument("--no-fp32", action="store_true", help="（Pareto）跳过 fp32 天花板基线")
+    pb.add_argument("--ckpt-dir", default=None, help="（Pareto）.phos 产物目录（默认 ckpt/pareto）")
+    # —— 矩阵/Pareto 共用 ——
+    pb.add_argument("--out-dir", default=None, help="（矩阵/Pareto）产物目录（默认 benchmarks）")
     pb.set_defaults(func=cmd_bench)
 
     ps = sub.add_parser("sched", help="连续批处理生成（T4-D）：多条 prompt 一次融合前向")
