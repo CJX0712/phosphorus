@@ -12,7 +12,7 @@
 - **T3 ✅ 已完成**：`.phos` 导出 + 三值 5-bit 打包 + 纯 numpy 四后端；**不变量⑦ engine-vs-torch logits rel_err ≈ 0.0001%（argmax 100% 一致）**；不变量①③⑤⑥ 全部有测试覆盖。**端到端实测**（`docs/BENCHMARKS.md`）：真实训练 qat-hgf 1.78M × 150 步，val_loss 4.4979 → 3.8987（ppl 49.36）；`generate` 输出连贯莎剧风格文本；`bench` prefill 1296 tok/s、decode 290.9 tok/s。
 - **T4-A ✅ 已交付**：原生 C99 内核（zig cc 现场编译 + 内容寻址缓存 + 文件锁）；**TL / I2_S GEMM 在 int32 与 fp32 域与 numpy 逐位相等**（不变量⑧）；rmsnorm/softmax/rope < 1e-6；pack/unpack 逐字节相等；`backend.py` 实现后端注册 + `engine._use_native` 按实测 crossover 自适应调度。**实测**：tl native prefill **2.74x** / decode **1.48x**；i2s native decode **1.32x**（prefill 小 N 时 numpy 更优，已按调度回退）；94/94 pytest 全绿。
 - **T4-B~E 🔜 规划中**：分页 KV / 块管理 / GQA 注意力（B）、三种驱逐策略 SnapKV-PyramidKV-H2O（C）、连续批处理 + 采样器（D）、性能与端到端生成收尾（E）。
-- **T5 🔶 进行中（核心已交付）**：投机解码（O1/O2）✅ + 热 KV 增量解码 ✅ + C1★/C2/C4 达标 ✅；基准矩阵 / Pareto（O3）+ 文档收尾（API / CONTRIBUTING）🔜。
+- **T5 🔶 收尾中**：投机解码（O1/O2）✅ + 热 KV 增量解码 ✅ + C1★/C2/C4 达标 ✅；C5 基准矩阵 ✅ + **C6 HGF Pareto ✅（诚实判定：15% 内存→≥50% 质量恢复目标 ❌ 未达成）** + C7 API.md ✅；C8 HF 转换 🔜。
 
 > 注：实际落地为**扁平包** `phosphorus/*.py`（详见 `ARCHITECTURE.md` §0.4 / §2.1），与本文初版规划的嵌套子包结构不同——功能等价，仅目录组织简化。C2（val_loss<3.5）/ C4（HGF 字节占比）/ C6（投机 α）等量化验收的实测数字见 `docs/BENCHMARKS.md`。
 
@@ -218,7 +218,7 @@ graph LR
 > O1 自草稿（零额外权重）+ Leviathan 验证（随机 + 贪心双模式）+ **热 KV 增量解码**
 > （目标/草稿双 cache、`truncate_tail` 拒绝回滚、修复双 cache 逐轮脱同步缺陷）+ O2 自适应控制器 + 树草稿掩码 + n-gram 对照。
 > 实测：C1 分布等价（多 prompt 池化，χ²/df ≈ 1.02 + 自校准 KL）与贪心逐位一致；C2 α=0.849（tiny.phos dl=2）；C3 加速比：tiny.phos（3 层微模型）**0.91×** ❌ vs 合成 12 层模型 K=16 **2.26×** ✅（α=1.000 ceiling）；C4 控制器 6 项单测全绿。
-> C5（基准矩阵 harness）✅ 已交付；C6（HGF Pareto）/ C8（HF 转换）为剩余项；C7（API.md）✅ 已交付，见各检查点状态标注。
+> C5（基准矩阵 harness）✅ 已交付；C6（HGF Pareto）✅ 已交付（诚实判定：PRD「15% 内存换 ≥50% 质量恢复」目标未达成，详见 BENCHMARKS §5.8）；C8（HF 转换）🔜 为剩余项；C7（API.md）✅ 已交付，见各检查点状态标注。
 
 ### 目标
 实现三值原生自草稿投机解码（O1）+ Leviathan 严格验证 + 自适应控制器（O2）+ 树状草稿 + n-gram 对照；跑出完整基准矩阵与 HGF Pareto 曲线（O3）；补齐全部文档与 API。
@@ -242,7 +242,7 @@ graph LR
 | **C3 加速比** | 10 M 模型、`batch=1`、`α ≥ 0.6` 时，端到端 **speedup ≥ 1.3×**（相对同后端非投机）；`bench` 报告中同时给出 `α`、`K`、`树宽`、`speedup`、`backend` | ⚠️ **部分达成**：合成 12 层模型（α=1.000）K=16 → **2.26×**、K=8 → 1.64×、auto → 1.92× ✅；但 tiny.phos（3 层微模型，α≈0.78）仅 **0.91×** ❌ —— 每步前向微秒级、调用开销占主导，且截断后草稿核/目标核不一致拉低 α。判定：机制在「前向成本 ≫ 调用开销」的模型上兑现 C3；微模型属投机解码已知不划算 regime，O2 控制器会正确关闭。详见 BENCHMARKS §5.6 |
 | **C4 O2 控制器** | 状态机 `OFF→WARMUP→ON→DEGRADED→OFF` 全部转换可单测覆盖；`batch_size > 8` 时 `plan().enabled == False`；`α < 0.15` 时自动关闭；`N_dwell=8` 内不发生状态抖动（100 轮随机输入，翻转次数 ≤ 3）；预测 speedup 与实测 **相对误差 < 25%** | ✅ 6 项单测全绿（状态机转换 / batch 门控 / α 门控 / 100 轮随机 ≤3 翻转 / K* 暴力比对 / speedup 公式）；EWMA smooth=0.8（α 骤降 12 步内自动 OFF）；预测 vs 实测对标 🔜 C5 矩阵 |
 | **C5 基准矩阵** | `phosphorus bench --all` 输出：`{fp32, int8, ternary, ternary+spec} × batch ∈ {1,4,8} × seq ∈ {128,512}` 共 24 组；产物 `benchmarks/results.json` + `benchmarks/REPORT.md`（Markdown 表）+ 终端 **ASCII 柱状图**；指标齐全：`tokens/s, ms/token, ttft_ms, rss_mb_peak, ppl, alpha, speedup` | ✅ `scripts/bench_matrix.py` 交付：2 模型 × 24 = 48 组（**30 ok / 18 skipped**，跳过均带原因：max_seq_len 容量 + batch+spec 未组合）；指标齐全（另加解码相 tok/s 推导列）；results.json 含全量 raw_timings；REPORT.md 含 ASCII 柱状图 + 7 条方法论诚实性说明；median-of-3 抗噪。三条机制级结论：连续批处理 2.40×/5.31×、无 native 时 tl 回退慢 4–6×、投机收益前提是批量前向可摊薄开销（α=1.0 在 tl 回退上仍 0.73× vs fp32 路径 2.26×）。详见 BENCHMARKS §5.7 |
-| **C6 O3 Pareto** | `phosphorus bench --pareto --ranks 0,1,2,4,8,16` 输出表格 `r / 额外字节% / val_ppl / Δppl%` + ASCII 曲线；`r=4` 处需给出「15% 内存换回 X% 质量损失」的**具体数字**（X 必须 ≥ 50%，否则需在 `ALGORITHMS.md` 如实标注未达标并给出原因分析） | 🔜 未开工（需 6 档 rank 训练扫描，本机 BPE 数据准备 ~20min/轮为瓶颈） |
+| **C6 O3 Pareto** | `phosphorus bench --pareto --ranks 0,1,2,4,8,16` 输出表格 `r / 额外字节% / val_ppl / Δppl%` + ASCII 曲线；`r=4` 处需给出「15% 内存换回 X% 质量损失」的**具体数字**（X 必须 ≥ 50%，否则需在 `ALGORITHMS.md` 如实标注未达标并给出原因分析） | ✅ 已交付（`benchmarks/pareto.json` + `pareto.md` + BENCHMARKS §5.8）。**诚实未达标**：d512 r=4（实测 12.42% 内存，非 15%）fp32 天花板反常劣于量化模型（204.42 > 138.64），PRD 恢复率口径前提不成立，仅在 r=2 换回 −7.92% ppl；tiny r=4（36% 内存）恢复率 40.9% < 50%，最优 rank r=1 恢复率 45.8% 仍低于 50%。HGF 仅为极低位 rank（r=1–2）的弱 Pareto 改进，非「15% 内存换 ≥50% 质量」的大规模回收。**已在 §5.8.2 如实标注 + 原因分析**，ALGORITHMS/README 中「15% 额外内存」「HGF 通用质量补丁」类表述同步降级为实测结论 |
 | **C7 文档完整性** | `ALGORITHMS.md` 每个模块条目齐备 4 列：**来源论文/项目 + 链接 + 选型理由 + 我们的超越**；`README.md` 含徽章 + 5 分钟快速上手 + 实测数字；`API.md` 覆盖全部公开函数签名；`BENCHMARKS.md` 含完整数据表；`CITATION.cff` 合法 | ✅ `docs/API.md` 已交付（15 节：全部公开模块签名表 + 11 条契约陷阱 + 30 秒上手；签名经 `inspect` 抽查核对）；ARCHITECTURE/BENCHMARKS/TASKS 已同步 T5。`CITATION.cff` 🔜 |
 | **C8 P1 收尾** | `convert/hf_export.py` 能把 `.phos` 导出为 HF 格式（`transformers` 可 `from_pretrained`）；`README` 教程在干净 venv 中 5 分钟跑通（`setup.sh` → `tokenize` → `train --steps 500` → `quantize` → `generate`） | 🔜 未开工（P1） |
 

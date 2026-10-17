@@ -1,0 +1,231 @@
+{
+  "meta": {
+    "generated_at": "2026-10-18 02:57:09",
+    "corpus": "data\\raw\\tinyshakespeare.txt",
+    "steps": 150,
+    "protocols": {
+      "tiny": {
+        "model": {
+          "d_model": 192,
+          "n_layer": 3,
+          "n_head": 3,
+          "n_kv_head": 1,
+          "d_ff": 384,
+          "vocab_size": 4096,
+          "max_seq_len": 256
+        },
+        "train": {
+          "steps": 150,
+          "batch_size": 4,
+          "block_size": 64,
+          "warmup_steps": 10,
+          "seed": 1337
+        }
+      },
+      "d512": {
+        "model": {
+          "d_model": 512,
+          "n_layer": 8,
+          "n_head": 8,
+          "n_kv_head": 2,
+          "d_ff": 1280,
+          "vocab_size": 4096,
+          "max_seq_len": 256
+        },
+        "train": {
+          "steps": 150,
+          "batch_size": 4,
+          "block_size": 64,
+          "warmup_steps": 10,
+          "seed": 1337
+        }
+      }
+    },
+    "ppl_eval": "torch 口径：全部档位 torch 前向 teacher-forcing（2048 token 切片，block 128，in-domain 未切 held-out）；引擎口径：.phos 导出后 PhosModel fp32 前向（部署路径）",
+    "byte_ratio_formula": "HGF/三值权重% = 48·r·(in+out) / (5·in·out)（f16 因子 vs 5-bit 打包）；d=512 时 r=4 ≈ 15%"
+  },
+  "rows": [
+    {
+      "protocol": "tiny",
+      "tag": "tiny_fp32_ceiling",
+      "rank": null,
+      "qat": false,
+      "train_seconds": 11.7,
+      "ppl_torch": 116.05132120895124,
+      "ppl_engine": null,
+      "file_bytes": 0,
+      "ternary_bytes": 0,
+      "hgf_bytes_file": 0,
+      "train_val_ppl": 49.988846357031555
+    },
+    {
+      "protocol": "tiny",
+      "tag": "tiny_hgf_r0",
+      "rank": 0,
+      "qat": true,
+      "train_seconds": 18.6,
+      "ppl_torch": 122.06950708418363,
+      "ppl_engine": 122.06949535106375,
+      "file_bytes": 3468670,
+      "ternary_bytes": 199680,
+      "hgf_bytes_file": 0,
+      "train_val_ppl": 50.657073167205624
+    },
+    {
+      "protocol": "tiny",
+      "tag": "tiny_hgf_r1",
+      "rank": 1,
+      "qat": true,
+      "train_seconds": 20.0,
+      "ppl_torch": 119.30843622016558,
+      "ppl_engine": 119.308428575012,
+      "file_bytes": 3488062,
+      "ternary_bytes": 199680,
+      "hgf_bytes_file": 18090,
+      "train_val_ppl": 47.66424416345776
+    },
+    {
+      "protocol": "tiny",
+      "tag": "tiny_hgf_r2",
+      "rank": 2,
+      "qat": true,
+      "train_seconds": 17.0,
+      "ppl_torch": 120.8699207464762,
+      "ppl_engine": 120.86994010950795,
+      "file_bytes": 3506110,
+      "ternary_bytes": 199680,
+      "hgf_bytes_file": 36138,
+      "train_val_ppl": 48.423273913133734
+    },
+    {
+      "protocol": "tiny",
+      "tag": "tiny_hgf_r4",
+      "rank": 4,
+      "qat": true,
+      "train_seconds": 18.1,
+      "ppl_torch": 119.60650257435347,
+      "ppl_engine": 119.60649874222673,
+      "file_bytes": 3542206,
+      "ternary_bytes": 199680,
+      "hgf_bytes_file": 72234,
+      "train_val_ppl": 46.268789895273144
+    },
+    {
+      "protocol": "tiny",
+      "tag": "tiny_hgf_r8",
+      "rank": 8,
+      "qat": true,
+      "train_seconds": 16.0,
+      "ppl_torch": 121.48523159629114,
+      "ppl_engine": 121.48521213469137,
+      "file_bytes": 3614398,
+      "ternary_bytes": 199680,
+      "hgf_bytes_file": 144426,
+      "train_val_ppl": 49.94530405577671
+    },
+    {
+      "protocol": "tiny",
+      "tag": "tiny_hgf_r16",
+      "rank": 16,
+      "qat": true,
+      "train_seconds": 16.4,
+      "ppl_torch": 121.66250419696873,
+      "ppl_engine": 121.66250419696873,
+      "file_bytes": 3758783,
+      "ternary_bytes": 199680,
+      "hgf_bytes_file": 288810,
+      "train_val_ppl": 47.553890896909316
+    },
+    {
+      "protocol": "d512",
+      "tag": "d512_fp32_ceiling",
+      "rank": null,
+      "qat": false,
+      "train_seconds": 63.5,
+      "ppl_torch": 204.41818249624282,
+      "ppl_engine": null,
+      "file_bytes": 0,
+      "ternary_bytes": 0,
+      "hgf_bytes_file": 0,
+      "train_val_ppl": 82.2172143388448
+    },
+    {
+      "protocol": "d512",
+      "tag": "d512_hgf_r0",
+      "rank": 0,
+      "qat": true,
+      "train_seconds": 114.2,
+      "ppl_torch": 138.63770618843353,
+      "ppl_engine": 138.63771507218618,
+      "file_bytes": 13183230,
+      "ternary_bytes": 4485120,
+      "hgf_bytes_file": 0,
+      "train_val_ppl": 47.43909908988119
+    },
+    {
+      "protocol": "d512",
+      "tag": "d512_hgf_r1",
+      "rank": 1,
+      "qat": true,
+      "train_seconds": 123.5,
+      "ppl_torch": 130.3993154340097,
+      "ppl_engine": 130.39934050154787,
+      "file_bytes": 13326078,
+      "ternary_bytes": 4485120,
+      "hgf_bytes_file": 139376,
+      "train_val_ppl": 52.553455648849116
+    },
+    {
+      "protocol": "d512",
+      "tag": "d512_hgf_r2",
+      "rank": 2,
+      "qat": true,
+      "train_seconds": 123.1,
+      "ppl_torch": 127.69516088709402,
+      "ppl_engine": 127.69516497837706,
+      "file_bytes": 13465342,
+      "ternary_bytes": 4485120,
+      "hgf_bytes_file": 278640,
+      "train_val_ppl": 53.888315914498286
+    },
+    {
+      "protocol": "d512",
+      "tag": "d512_hgf_r4",
+      "rank": 4,
+      "qat": true,
+      "train_seconds": 127.1,
+      "ppl_torch": 131.68713145423933,
+      "ppl_engine": 131.68715255015874,
+      "file_bytes": 13743870,
+      "ternary_bytes": 4485120,
+      "hgf_bytes_file": 557168,
+      "train_val_ppl": 56.082376192771065
+    },
+    {
+      "protocol": "d512",
+      "tag": "d512_hgf_r8",
+      "rank": 8,
+      "qat": true,
+      "train_seconds": 128.7,
+      "ppl_torch": 132.57022630454713,
+      "ppl_engine": 132.57024754193583,
+      "file_bytes": 14300926,
+      "ternary_bytes": 4485120,
+      "hgf_bytes_file": 1114224,
+      "train_val_ppl": 57.69365320521042
+    },
+    {
+      "protocol": "d512",
+      "tag": "d512_hgf_r16",
+      "rank": 16,
+      "qat": true,
+      "train_seconds": 132.3,
+      "ppl_torch": 129.3603081143817,
+      "ppl_engine": 129.3603371268187,
+      "file_bytes": 15415039,
+      "ternary_bytes": 4485120,
+      "hgf_bytes_file": 2228336,
+      "train_val_ppl": 47.258455480098974
+    }
+  ]
+}
