@@ -266,9 +266,7 @@ def cmd_bench(a: argparse.Namespace) -> None:
     from .engine import PhosModel
 
     if not a.model:
-        raise SystemExit(
-            "--model 必填（单次吞吐基准）；C5 矩阵用 --all，C6 Pareto 用 --pareto"
-        )
+        raise SystemExit("--model 必填（单次吞吐基准）；C5 矩阵用 --all，C6 Pareto 用 --pareto")
 
     model = PhosModel.from_file(
         a.model,
@@ -330,10 +328,17 @@ def cmd_convert(a: argparse.Namespace) -> None:
     """导出 .phos 为 HuggingFace 格式（T5-C8）。"""
     from .convert import hf_export
 
-    out = hf_export.export_to_hf(a.model, a.out, dtype=getattr(a, "dtype", "fp16"))
+    out = hf_export.export_to_hf(
+        a.model,
+        a.out,
+        dtype=getattr(a, "dtype", "fp16"),
+        faithful=getattr(a, "faithful", False),
+    )
     print(f"[ok] HuggingFace 模型 -> {out} (config.json + pytorch_model.bin)")
-    print("[note] 标准 LlamaForCausalLM 省略 BitNet SubLN，属架构近似等价；"
-          "逐位保真请用 Phosphorus 原生引擎。")
+    print(
+        "[note] 标准 LlamaForCausalLM 省略 BitNet SubLN，属架构近似等价；"
+        "逐位保真请用 Phosphorus 原生引擎。"
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -419,7 +424,8 @@ def build_parser() -> argparse.ArgumentParser:
     pb = sub.add_parser("bench", help="推理吞吐基准 / C5 矩阵 / C6 Pareto")
     # —— 单次吞吐基准（原有，零 torch 依赖）——
     pb.add_argument(
-        "--model", default=None,
+        "--model",
+        default=None,
         help="模型 .phos 路径（单次基准必填；--all/--pareto 时忽略）",
     )
     pb.add_argument("--tokens", type=int, default=64)
@@ -442,23 +448,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     # —— C5 全基准矩阵（scripts/bench_matrix.py）——
     pb.add_argument(
-        "--all", "--matrix", dest="matrix", action="store_true",
+        "--all",
+        "--matrix",
+        dest="matrix",
+        action="store_true",
         help="C5 全基准矩阵：{fp32,int8,ternary,ternary+spec} × batch∈{1,4,8} × seq∈{128,512}",
     )
     pb.add_argument("--quick", action="store_true", help="（矩阵）只跑 seq=128, batch=1")
-    pb.add_argument("--repeats", type=int, default=None, help="（矩阵）每组重复次数（默认 3，取中位数）")
     pb.add_argument(
-        "--report-only", default=None, metavar="RESULTS_JSON",
+        "--repeats", type=int, default=None, help="（矩阵）每组重复次数（默认 3，取中位数）"
+    )
+    pb.add_argument(
+        "--report-only",
+        default=None,
+        metavar="RESULTS_JSON",
         help="（矩阵）从既有 results.json 重新生成 REPORT.md",
     )
     pb.add_argument("--n-new", type=int, default=None, help="（矩阵）每组生成 token 数（默认 32）")
     # —— C6 HGF Pareto 扫描（scripts/bench_pareto.py）——
     pb.add_argument(
-        "--pareto", action="store_true",
+        "--pareto",
+        action="store_true",
         help="C6 HGF Pareto 扫描：按 --ranks 各档 r 输出 字节%%/val_ppl/Δppl%% + ASCII 曲线",
     )
     pb.add_argument("--ranks", default=None, help="（Pareto）rank 档位列表，如 0,1,2,4,8,16")
-    pb.add_argument("--protocol", default=None, choices=["tiny", "d512", "both"], help="（Pareto）训练协议")
+    pb.add_argument(
+        "--protocol", default=None, choices=["tiny", "d512", "both"], help="（Pareto）训练协议"
+    )
     pb.add_argument("--steps", type=int, default=None, help="（Pareto）训练步数（默认 150）")
     pb.add_argument("--no-fp32", action="store_true", help="（Pareto）跳过 fp32 天花板基线")
     pb.add_argument("--ckpt-dir", default=None, help="（Pareto）.phos 产物目录（默认 ckpt/pareto）")
@@ -499,6 +515,12 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--model", required=True, help="输入 .phos 路径")
     pc.add_argument("--out", required=True, help="输出 HF 模型目录")
     pc.add_argument("--dtype", default="fp16", choices=["fp16", "fp32"])
+    pc.add_argument(
+        "--faithful",
+        action="store_true",
+        help="忠实模式：导出自定义 PhosphorusForCausalLM（含 SubLN 增益 + ReLU²），"
+        "from_pretrained(trust_remote_code=True) 逐位等价于原生引擎",
+    )
     pc.set_defaults(func=cmd_convert)
 
     return p

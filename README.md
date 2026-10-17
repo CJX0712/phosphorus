@@ -85,7 +85,9 @@ python -m phosphorus generate --model ckpt/tiny.phos \
 
 ### 导出到 Hugging Face（T5-C8）
 
-把 `.phos` 转换为 `transformers` 可 `from_pretrained` 的目录（标准 `LlamaForCausalLM` 权重）：
+把 `.phos` 转换为 `transformers` 可 `from_pretrained` 的目录，支持两种模式：
+
+**近似模式（默认，标准 `LlamaForCausalLM` 权重）：**
 
 ```bash
 python -m phosphorus convert --model ckpt/tiny.phos --out hf_model --dtype fp16
@@ -95,11 +97,25 @@ python -m phosphorus convert --model ckpt/tiny.phos --out hf_model --dtype fp16
 # m = LlamaForCausalLM.from_pretrained("hf_model")
 ```
 
-> **已知限制（诚实标注）**：标准 `LlamaForCausalLM` 不含 BitNet 的 SubLN 子层，
-> 导出会**省略 SubLN**，故 HF 模型是**架构近似等价**（权重级忠实、前向图不完全一致）；
-> 引擎激活为 ReLU²、HF 标准 Llama 用 `relu`，亦有轻微数值差异。逐位保真请使用
-> Phosphorus 原生引擎（`phosphorus generate`）。详见
-> [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) §6.2。
+**忠实模式（`--faithful`，自定义 `PhosphorusForCausalLM`，逐位等价于原生引擎）：**
+
+```bash
+python -m phosphorus convert --model ckpt/tiny.phos --out hf_model --faithful
+# 目录自带 modeling_phosphorus.py（auto_map 加载），含 SubLN 增益 + ReLU² 激活
+# from transformers import AutoModelForCausalLM
+# m = AutoModelForCausalLM.from_pretrained("hf_model", trust_remote_code=True)
+```
+
+> **已知限制（诚实标注，2026-10-18 已修正）**：此前近似与忠实两种导出都因 `_dequantize`
+> 误用「去后缀基名」查 `scales`/`hgf` 字典（实际以全名 `layers.i.proj.weight` 为键），
+> 导致 **absmean scale 与 HGF 低秩校正从未应用**——导出的是未还原的原始三值权重。
+> 该 bug 因 `from_pretrained` 测试长期被 `importorskip` 跳过而潜伏。
+> **现已修复**：近似模式真正还原权重（含 scale+HGF 折叠）；忠实模式 `from_pretrained`
+> 与原生引擎**逐位等价**（logits 相对误差 <1e-2）。
+>
+> 残余差异：标准 `LlamaForCausalLM` 近似模式仍**省略 SubLN**（数据相关、不可静态折叠）
+> 且激活改 `relu`（引擎用 ReLU²），属架构近似；需要逐位保真请用 `--faithful` 或原生引擎
+> （`phosphorus generate`）。详见 [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) §6.2。
 
 ---
 

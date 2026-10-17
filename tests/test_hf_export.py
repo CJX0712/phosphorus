@@ -5,6 +5,7 @@
   * `test_hf_from_pretrained` 内 `importorskip("transformers")` —— 仅当环境装了
     transformers 才做真实 `from_pretrained` 加载；否则跳过但导出结构仍被前序用例验证。
 """
+
 import json
 import shutil
 from pathlib import Path
@@ -22,14 +23,17 @@ from phosphorus.loader import load_phos  # noqa: E402
 
 
 def _recompute_q_proj(phos):
-    """按导出公式手动还原 layers.0 q_proj 的 fp32 权重（三值解包 + scale + HGF 折叠）。"""
+    """按导出公式手动还原 layers.0 q_proj 的 fp32 权重（三值解包 + scale + HGF 折叠）。
+
+    注意：`.phos` 的 `scales` / `hgf` 以**全名**（含 `.weight` 后缀）为键，
+    必须以 `name` 原样查表。
+    """
     name = "layers.0.q_proj.weight"  # .phos 原始键名（HF 的 self_attn. 前缀是导出时才映射的）
-    base = name[: -len(".weight")]
     w = phos.weights[name].astype(np.float32)
-    scale = phos.scales.get(base)
+    scale = phos.scales.get(name)
     if scale is not None:
         w = w * scale.reshape(-1, 1)
-    hgf = phos.hgf.get(base)
+    hgf = phos.hgf.get(name)
     if hgf is not None:
         A, B, gate = hgf
         r = int(A.shape[0])
@@ -55,17 +59,10 @@ def test_map_key_coverage():
     assert hf_export._map_key("lm_head") == "lm_head.weight"
     assert hf_export._map_key("layers.0.attn_norm") == "model.layers.0.input_layernorm.weight"
     assert (
-        hf_export._map_key("layers.0.ffn_norm")
-        == "model.layers.0.post_attention_layernorm.weight"
+        hf_export._map_key("layers.0.ffn_norm") == "model.layers.0.post_attention_layernorm.weight"
     )
-    assert (
-        hf_export._map_key("layers.3.q_proj.weight")
-        == "model.layers.3.self_attn.q_proj.weight"
-    )
-    assert (
-        hf_export._map_key("layers.3.down_proj.weight")
-        == "model.layers.3.mlp.down_proj.weight"
-    )
+    assert hf_export._map_key("layers.3.q_proj.weight") == "model.layers.3.self_attn.q_proj.weight"
+    assert hf_export._map_key("layers.3.down_proj.weight") == "model.layers.3.mlp.down_proj.weight"
     # SubLN / scale / hgf 附属张量应被跳过
     assert hf_export._map_key("layers.0.subln_attn") is None
     assert hf_export._map_key("layers.0.q_proj.scale") is None

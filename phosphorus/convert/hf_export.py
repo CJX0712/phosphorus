@@ -58,10 +58,13 @@ def _map_key(name: str) -> str | None:
         return f"model.layers.{idx}.post_attention_layernorm.weight"
     # 投影权重：去掉 .weight 后缀映射到对应子模块
     proj = rest[: -len(".weight")] if rest.endswith(".weight") else rest
-    attn_map = {"q_proj": "self_attn.q_proj", "k_proj": "self_attn.k_proj",
-                "v_proj": "self_attn.v_proj", "o_proj": "self_attn.o_proj"}
-    mlp_map = {"gate_proj": "mlp.gate_proj", "up_proj": "mlp.up_proj",
-               "down_proj": "mlp.down_proj"}
+    attn_map = {
+        "q_proj": "self_attn.q_proj",
+        "k_proj": "self_attn.k_proj",
+        "v_proj": "self_attn.v_proj",
+        "o_proj": "self_attn.o_proj",
+    }
+    mlp_map = {"gate_proj": "mlp.gate_proj", "up_proj": "mlp.up_proj", "down_proj": "mlp.down_proj"}
     if proj in attn_map:
         return f"model.layers.{idx}.{attn_map[proj]}.weight"
     if proj in mlp_map:
@@ -70,13 +73,16 @@ def _map_key(name: str) -> str | None:
 
 
 def _dequantize(name: str, phos, alpha: float, dtype=np.float16) -> np.ndarray:
-    """还原单个权重为 fp32（三值解包 + scale + HGF 折叠），再转 dtype。"""
-    base = name[: -len(".weight")] if name.endswith(".weight") else name
+    """还原单个权重为 fp32（三值解包 + scale + HGF 折叠），再转 dtype。
+
+    注意：`.phos` 的 `scales` / `hgf` 字典以**全名**（含 `.weight` 后缀，
+    如 `layers.0.q_proj.weight`）为键，必须以 `name` 原样查表，不能去掉后缀。
+    """
     arr = phos.weights[name].astype(np.float32)
-    scale = phos.scales.get(base)
+    scale = phos.scales.get(name)
     if scale is not None:
         arr = arr * scale.reshape(-1, 1)  # per-channel absmean scale
-    hgf = phos.hgf.get(base)
+    hgf = phos.hgf.get(name)
     if hgf is not None:
         A, B, gate = hgf
         r = int(A.shape[0])
@@ -123,6 +129,63 @@ def _build_config(phos, tie_word_embeddings: bool) -> dict:
     }
 
 
+# ---- 忠实模式（T5-C8 增强）：逐位复刻原生引擎前向 ---- #
+_LAYER_PROJS = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
+_LAYER_NORMS = ("attn_norm", "ffn_norm")
+_LAYER_SUBLN = ("subln_attn", "subln_ffn")
+
+
+def _build_state_dict_faithful(phos, dtype=np.float16):
+    """忠实模式权重：Phosphorus 原生键名（含 SubLN 增益），供 modeling_phosphorus 加载。
+
+    与近似模式不同，此处**保留 subln_attn/subln_ffn**，且键名对应自定义模型
+    （layers.{i}.{q_proj,k_proj,...}.weight / layers.{i}.{attn_norm,ffn_norm}.weight
+    / layers.{i}.{subln_attn,subln_ffn}），而非 HF Llama 命名。
+    """
+    alpha = float(phos.header.get("hgf_alpha", 1.0))
+    n_layer = int(phos.header["n_layer"])
+    sd: dict[str, np.ndarray] = {}
+    sd["tok_emb"] = phos.weights["tok_emb"].astype(dtype)
+    sd["norm_final"] = phos.weights["norm_final"].astype(dtype)
+    if "lm_head" in phos.weights:
+        sd["lm_head"] = phos.weights["lm_head"].astype(dtype)
+    for i in range(n_layer):
+        for nm in _LAYER_NORMS:
+            sd[f"layers.{i}.{nm}.weight"] = phos.weights[f"layers.{i}.{nm}"].astype(dtype)
+        for nm in _LAYER_SUBLN:
+            sd[f"layers.{i}.{nm}"] = phos.weights[f"layers.{i}.{nm}"].astype(dtype)
+        for proj in _LAYER_PROJS:
+            name = f"layers.{i}.{proj}.weight"
+            sd[f"layers.{i}.{proj}.weight"] = _dequantize(name, phos, alpha, dtype)
+    return sd
+
+
+def _build_config_faithful(phos, tie_word_embeddings: bool) -> dict:
+    h = phos.header
+    act_id = int(h.get("act", 1))
+    act = "relu2" if act_id == 1 else "swiglu"
+    return {
+        "architectures": ["PhosphorusForCausalLM"],
+        "model_type": "phosphorus",
+        "auto_map": {"AutoModelForCausalLM": "modeling_phosphorus.PhosphorusForCausalLM"},
+        "vocab_size": int(h["vocab"]),
+        "hidden_size": int(h["d_model"]),
+        "num_hidden_layers": int(h["n_layer"]),
+        "num_attention_heads": int(h["n_head"]),
+        "num_key_value_heads": int(h["n_kv_head"]),
+        "intermediate_size": int(h["d_ff"]),
+        "max_position_embeddings": int(h["max_seq_len"]),
+        "rms_norm_eps": float(h["norm_eps"]),
+        "rope_theta": float(h["rope_theta"]),
+        "act": act,
+        "hidden_act": act,
+        "tie_word_embeddings": bool(tie_word_embeddings),
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+        "transformers_version": "4.40.0",
+    }
+
+
 def _export_tokenizer(phos, out_dir: Path) -> bool:
     """把 Phosphorus BPE 分词器导出为 GPT2-BPE 兼容格式（best-effort）。"""
     tok = phos.tokenizer
@@ -130,9 +193,7 @@ def _export_tokenizer(phos, out_dir: Path) -> bool:
         return False
     try:
         vocab = {str(i): s for i, s in enumerate(tok.vocab)}
-        (out_dir / "vocab.json").write_text(
-            json.dumps(vocab, ensure_ascii=False), encoding="utf-8"
-        )
+        (out_dir / "vocab.json").write_text(json.dumps(vocab, ensure_ascii=False), encoding="utf-8")
         with (out_dir / "merges.txt").open("w", encoding="utf-8") as f:
             f.write("# merging pairs\n")
             for a, b in tok.merges:
@@ -152,13 +213,16 @@ def _export_tokenizer(phos, out_dir: Path) -> bool:
         return False
 
 
-def export_to_hf(phos_path, out_dir, dtype: str = "fp16") -> Path:
+def export_to_hf(phos_path, out_dir, dtype: str = "fp16", faithful: bool = False) -> Path:
     """把 `.phos` 导出为 HuggingFace 模型目录（config.json + pytorch_model.bin）。
 
     参数：
         phos_path: `.phos` 文件路径
         out_dir:   输出目录（不存在则创建）
         dtype:     "fp16"（默认）或 "fp32"
+        faithful:  True → 忠实模式：导出自定义 `PhosphorusForCausalLM`（含 SubLN 增益
+                   + ReLU² 激活），`from_pretrained(trust_remote_code=True)` 逐位等价于
+                   原生引擎；False（默认）→ 标准 `LlamaForCausalLM` 近似等价导出。
     返回：
         输出目录 Path。
     """
@@ -166,16 +230,27 @@ def export_to_hf(phos_path, out_dir, dtype: str = "fp16") -> Path:
 
     np_dtype = np.float16 if dtype == "fp16" else np.float32
     phos = load_phos(phos_path)
-    sd = _build_state_dict(phos, np_dtype)
 
-    # tied：.phos 标记 tied 且 lm_head 未独立存储 → 让 HF 共享 embed_tokens
+    # tied：.phos 标记 tied 且 lm_head 未独立存储 → 让模型共享 embed_tokens
     flags = int(phos.header.get("flags", 0))
     F_TIED_EMBED = 1 << 1
-    tied = bool(flags & F_TIED_EMBED) and "lm_head.weight" not in sd
-    cfg = _build_config(phos, tie_word_embeddings=tied)
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+
+    if faithful:
+        sd = _build_state_dict_faithful(phos, np_dtype)
+        tied = bool(flags & F_TIED_EMBED) and "lm_head" not in sd
+        cfg = _build_config_faithful(phos, tie_word_embeddings=tied)
+        # 复制建模文件，使目录自包含（from_pretrained 经 auto_map 加载）
+        _copy_modeling_file(out)
+        arch_note = "PhosphorusForCausalLM（忠实：含 SubLN 增益 + ReLU²，逐位等价于原生引擎）"
+    else:
+        sd = _build_state_dict(phos, np_dtype)
+        tied = bool(flags & F_TIED_EMBED) and "lm_head.weight" not in sd
+        cfg = _build_config(phos, tie_word_embeddings=tied)
+        arch_note = "LlamaForCausalLM（近似等价：省略 SubLN 增益、激活改为 relu）"
+
     (out / "config.json").write_text(
         json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -186,7 +261,15 @@ def export_to_hf(phos_path, out_dir, dtype: str = "fp16") -> Path:
     torch.save(th_sd, out / "pytorch_model.bin")
 
     _export_tokenizer(phos, out)
+    print(f"[ok] HuggingFace 模型 -> {out} （{arch_note}）")
     return out
+
+
+def _copy_modeling_file(out_dir: Path) -> None:
+    """把 modeling_phosphorus.py 复制到导出目录，使目录自包含。"""
+    src = Path(__file__).resolve().parent / "modeling_phosphorus.py"
+    if src.exists():
+        shutil.copyfile(src, out_dir / "modeling_phosphorus.py")
 
 
 def cleanup(path: str | Path) -> None:
