@@ -65,7 +65,7 @@
 | KV 驱逐策略 | `phosphorus/eviction.py`（SnapKV/PyramidKV/H2O/StreamingLLM + 统一保留掩码） | ✅ T4-C（不变量⑦） |
 | `speculate/*`（投机解码） | `phosphorus/speculate/{verify,layerskip,ngram,controller,tree,eagle,medusa,base}.py` + `engine.truncate_tail/shadow` + `speculate.generate_tokens` 热 KV 主循环 | ✅ T5（C1★ 分布等价 + C2 零额外字节 + C4 控制器；C3/C5/C6 见 BENCHMARKS §T5） |
 | `bench/*` | `scripts/bench_speculate.py`（吞吐矩阵）+ `scripts/bench_matrix.py`（C5 全基准矩阵）+ `scripts/bench_pareto.py`（C6 HGF Pareto）+ `scripts/build_synthetic_model.py`（regime 演示模型） | ✅ T5-C5/C6 |
-| `convert/*` | HF 导入/导出 | 🔜 T5-C8（P1） |
+| `convert/*` | `phosphorus/convert/hf_export.py`（.phos → HF 目录）+ `modeling_phosphorus.py`（忠实自定义模型） | ✅ T5-C8（`--faithful` from_pretrained 逐位等价，transformers 5.20.1 实测） |
 
 ---
 
@@ -215,7 +215,10 @@ phosphorus/
 │   ├── packing.py                     # 三值 5-bit pack/unpack（合并自 quantize/packing）
 │   ├── gemm.py                        # TL / I2_S / int32 参考（合并自 kernels/numpy_backend/gemm）
 │   ├── loader.py                      # .phos 加载（合并自 engine/model_loader）
-│   ├── convert/                       # T5-C8 HF 导出：hf_export.py（.phos → LlamaForCausalLM 权重）
+│   ├── convert/                       # T5-C8 HF 导出（.phos → transformers 可加载目录）
+│   │   ├── __init__.py                # 仅暴露 export_to_hf（惰性 torch 导入）
+│   │   ├── hf_export.py               # 近似（LlamaForCausalLM）/ 忠实（--faithful）两种导出
+│   │   └── modeling_phosphorus.py     # 忠实自定义模型：PreTrainedModel / nn.Module 双外壳
 │   ├── engine.py                      # 推理引擎（numpy + native 自适应调度 + 分页 KV）
 │   ├── backend.py                     # 实现后端注册：native / numpy（T4-A）
 │   ├── block_manager.py               # 分页块管理：block_tables / 引用计数 / 滑动窗口（T4-B）
@@ -262,7 +265,9 @@ phosphorus/
 │   ├── test_scheduler.py              # T4-D：连续批处理调度（add/abort/融合等价）
 │   ├── test_speculative_distribution.py # T5-C1/C2：分布等价 χ²+KL / 贪心逐位一致 / O1 零额外字节
 │   ├── test_controller.py             # T5-C4：O2 控制器状态机 / 门控 / K* 决策
-│   └── test_tree_mask.py              # T5：树草稿因果掩码 / 剪枝不变量
+│   ├── test_tree_mask.py              # T5：树草稿因果掩码 / 剪枝不变量
+│   ├── test_hf_export.py              # T5-C8：HF 导出键名映射 / 结构 / 解量化公式
+│   └── test_hf_faithful.py            # T5-C8：忠实模式 vs 原生引擎逐位等价（含 from_pretrained）
 ├── data/raw/
 │   └── tinyshakespeare.txt            # 离线兜底语料（随仓库提交，1.1 MB）
 ├── NOTICE                            # 第三方代码归属（BitNet.cpp I2_S SIMD 移植，MIT）
@@ -292,7 +297,7 @@ phosphorus/
 | `phosphorus/kv_cache.py` | 分页 KV 物理池 `[n_blocks, n_layer, 2, bs, n_kv, dh]` + begin/write/gather 协议 | `PagedKVCache` | ✅ T4-B |
 | `phosphorus/attention.py` | GQA 注意力：paged 与 dense 共用同一数学核心 | `gqa_attention`, `paged_gqa_attention` | ✅ T4-B（不变量⑨） |
 | `phosphorus/sampling.py` | temperature / top-k / top-p 采样 | `sample` | ✅ T3 |
-| `phosphorus/cli.py` | 子命令分发：`train / export / generate / bench / tokenize`（`--kv`/`--backend`） | `build_parser`, `main` | ✅ T1 + T4-B |
+| `phosphorus/cli.py` | 子命令分发：`train / export / quantize / generate / bench（--all/--matrix/--pareto）/ sched / tokenize / convert（--faithful）` | `build_parser`, `main` | ✅ T1 + T4-B + T5 |
 | `phosphorus/csrc/phos.h` | 原生 C99 内核 ABI 头（TL GEMM / RMSNorm / softmax / RoPE / pack） | `phos_tl_gemm_f32` 等 | ✅ T4-A（随 wheel 分发） |
 | `phosphorus/eviction.py` | KV 驱逐策略（SnapKV/PyramidKV/H2O/StreamingLLM，逐层预算 + 统一保留 sink+窗口） | `make_policy`, `EvictionConfig`, `EVICTIONS` | ✅ T4-C（不变量⑦） |
 | `phosphorus/scheduler.py` | 连续批处理调度：多 prompt 波次切分 + greedy/采样生成 | `Scheduler` | ✅ T4-D（吞吐 2.35×） |
@@ -304,8 +309,9 @@ phosphorus/
 | `phosphorus/speculate/__init__.py` | 热 KV 增量投机主循环：双 cache 草稿/验证 + `truncate_tail` 拒绝回滚 | `generate_tokens` | ✅ T5-C3 机制 |
 | `scripts/bench_speculate.py` | 投机解码吞吐矩阵（K × draft_layers × seeds，含接受率 α） | — | ✅ T5-C5/C6 |
 | `scripts/bench_matrix.py` | T5-C5 全基准矩阵（`{fp32,int8,tl,tl+spec} × batch{1,4,8} × seq{128,512}` → `benchmarks/results.json` + `REPORT.md` + ASCII 图） | — | ✅ T5-C5 |
-| `convert/*` | HF 导入/导出 | — | 🔜 T5-C8（P1） |
-| `convert.hf_*` | HF `transformers` ↔ `.phos` / ckpt 互转 | safetensors | 目标格式 | `import_hf()`, `export_hf()` |
+| `phosphorus/convert/hf_export.py` | `.phos` → HuggingFace 目录（config.json + pytorch_model.bin + 分词器；近似 LlamaForCausalLM / 忠实 `--faithful` 两种模式） | `export_to_hf` | ✅ T5-C8 |
+| `phosphorus/convert/modeling_phosphorus.py` | 忠实模式自定义模型（PreTrainedModel / nn.Module 双外壳），`from_pretrained(trust_remote_code=True)` 逐位等价于原生引擎（transformers 5.20.1 实测 rel_max 8.06e-07） | `PhosphorusForCausalLM`, `PhosphorusConfig` | ✅ T5-C8 |
+| HF → `.phos` 反向导入（`import_hf`） | 早期规划项，**未实现**（当前无需求，P2 候选） | — | 🔜 未排期（诚实标注） |
 
 ---
 

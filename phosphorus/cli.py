@@ -92,6 +92,11 @@ def cmd_export(a: argparse.Namespace) -> None:
         print(inspect_phos(a.checkpoint))
         return
 
+    if not a.out:
+        raise SystemExit(
+            "phosphorus export: error: 非 --inspect 模式需要 --out 指定输出 .phos 路径"
+        )
+
     cfg = build_config_from_args(a)
     ckpt = torch.load(a.checkpoint, map_location="cpu", weights_only=False)
     model = LlamaModel(cfg.model, cfg.quant)
@@ -300,21 +305,36 @@ def cmd_bench(a: argparse.Namespace) -> None:
 def cmd_tokenize(a: argparse.Namespace) -> None:
     from .tokenizer import Tokenizer, train_from_corpus
 
+    # encode/decode/roundtrip 需要 --tokenizer：指向 `tokenize --action train`
+    # 产出的文本格式分词器文件（.phos 是二进制模型，不是分词器）。
+    # 缺省给清晰报错而非 Path(None) TypeError；误传二进制给可读提示而非裸 traceback。
+    tok = None
+    if a.action in ("encode", "decode", "roundtrip"):
+        if not getattr(a, "tokenizer", None):
+            raise SystemExit(
+                f"phosphorus tokenize: error: --action {a.action} 需要 --tokenizer 指向分词器文件"
+                "（由 `tokenize --action train --corpus ... --out ...` 产出；.phos 不是分词器文件）"
+            )
+        try:
+            tok = Tokenizer.load(a.tokenizer)
+        except UnicodeDecodeError as e:
+            raise SystemExit(
+                f"phosphorus tokenize: error: --tokenizer {a.tokenizer} 不是文本格式的分词器文件"
+                f"（{e}；.phos 是二进制模型，不能作为分词器）"
+            ) from e
+
     if a.action == "train":
         tok = train_from_corpus(a.corpus, vocab_size=a.vocab)
         tok.save(a.out)
         print(f"[ok] tokenizer ({tok.vocab_size} tokens) -> {a.out}")
     elif a.action == "encode":
-        tok = Tokenizer.load(a.tokenizer)
         ids = tok.encode(a.text)
         print(ids[:200], "..." if len(ids) > 200 else "")
         print(f"[ok] {len(ids)} tokens")
     elif a.action == "decode":
-        tok = Tokenizer.load(a.tokenizer)
         ids = [int(x) for x in a.text.split()]
         print(repr(tok.decode(ids)))
     elif a.action == "roundtrip":
-        tok = Tokenizer.load(a.tokenizer)
         ids = tok.encode(a.text)
         print("[ok] encode->decode 恒等:", tok.decode(ids) == a.text)
 
@@ -373,7 +393,7 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--checkpoint", "--in", dest="checkpoint", required=True)
     pe.add_argument("--config", default=None)
     pe.add_argument("--tokenizer", default=None)
-    pe.add_argument("--out", required=True)
+    pe.add_argument("--out", default=None, help="输出 .phos 路径（--inspect 时可省略）")
     pe.add_argument("--scale", default=None, choices=["tiny", "small", "base"])
     pe.add_argument("--vocab", type=int, default=None)
     pe.add_argument("--inspect", action="store_true", help="只打印 .phos 结构与张量索引")
