@@ -106,12 +106,15 @@ python -m phosphorus convert --model ckpt/tiny.phos --out hf_model --faithful
 # m = AutoModelForCausalLM.from_pretrained("hf_model", trust_remote_code=True)
 ```
 
-> **已知限制（诚实标注，2026-10-18 已修正）**：此前近似与忠实两种导出都因 `_dequantize`
-> 误用「去后缀基名」查 `scales`/`hgf` 字典（实际以全名 `layers.i.proj.weight` 为键），
-> 导致 **absmean scale 与 HGF 低秩校正从未应用**——导出的是未还原的原始三值权重。
-> 该 bug 因 `from_pretrained` 测试长期被 `importorskip` 跳过而潜伏。
-> **现已修复**：近似模式真正还原权重（含 scale+HGF 折叠）；忠实模式 `from_pretrained`
-> 与原生引擎**逐位等价**（logits 相对误差 <1e-2）。
+> **已知限制（诚实标注）**：
+> - **已修复（2026-10-18）**：`_dequantize` 原误用「去后缀基名」查 `scales`/`hgf` 字典
+>   （实际以全名 `layers.i.proj.weight` 为键），导致 **absmean scale 与 HGF 低秩校正从未应用**，
+>   导出的是未还原的原始三值权重（该 bug 因 `from_pretrained` 测试长期被 `importorskip` 跳过而潜伏）。
+>   现已统一为全名查表，近似模式真正还原权重。
+> - **验收实跑（2026-10-19）**：装好 transformers 5.20.1 后，`from_pretrained(trust_remote_code=True)`
+>   真实路径已跑通——`ckpt/tiny.phos`（d=192/3 层）多组输入（1/3/8/32/64/256 token）与原生引擎
+>   **逐位等价**：相对误差 max 范数 **8.06e-07**、L2 **3.15e-07**、argmax 一致率 **100%**、
+>   参数量 1,747,392。纯 torch 回退分支（无 transformers 时走 `nn.Module` 外壳）也已独立验证逐位等价。
 >
 > 残余差异：标准 `LlamaForCausalLM` 近似模式仍**省略 SubLN**（数据相关、不可静态折叠）
 > 且激活改 `relu`（引擎用 ReLU²），属架构近似；需要逐位保真请用 `--faithful` 或原生引擎

@@ -79,13 +79,26 @@ def test_faithful_subln_keys_present(tmp_path):
     assert not any("subln" in k for k in sd2), "近似模式不应含 subln"
 
 
+def _transformers_importable() -> bool:
+    """transformers 是否**可实际导入**（而非仅 find_spec 能找到）。
+
+    用 find_spec 判断是不够的：find_spec 只做路径查找，遇到「存在但导入时抛异常」
+    的 transformers（损坏安装 / 测试用 PYTHONPATH 屏蔽桩）会返回非 None，
+    导致本用例不跳过却在 `import transformers` 处硬失败。真实导入一次才可靠。
+    """
+    try:
+        import transformers  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
 @pytest.mark.skipif(
-    __import__("importlib.util", fromlist=["find_spec"]).find_spec("transformers") is None,
+    not _transformers_importable(),
     reason="需要 transformers 以验证 from_pretrained 集成路径",
 )
 def test_faithful_from_pretrained(tmp_path):
     """有 transformers 时，from_pretrained(trust_remote_code=True) 应加载并逐位等价。"""
-    import transformers  # noqa: F401
     from transformers import AutoModelForCausalLM
 
     out = tmp_path / "hf_faithful3"

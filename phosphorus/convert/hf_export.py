@@ -236,6 +236,17 @@ def export_to_hf(phos_path, out_dir, dtype: str = "fp16", faithful: bool = False
     """
     from ..loader import load_phos  # 惰性（loader 零 torch 依赖）
 
+    # dtype 校验：仅支持 fp16/fp32，非法值必须显式报错而非静默降级为 fp32
+    # （静默降级会掩盖调用方的错误输入，违反"诚实 > 漂亮数字"）。
+    if dtype == "fp16":
+        np_dtype = np.float16
+    elif dtype == "fp32":
+        np_dtype = np.float32
+    else:
+        raise ValueError(
+            f"--dtype 仅支持 'fp16' / 'fp32'，收到 {dtype!r}（非法值不再静默降级为 fp32）"
+        )
+
     np_dtype = np.float16 if dtype == "fp16" else np.float32
     phos = load_phos(phos_path)
 

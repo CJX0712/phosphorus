@@ -526,10 +526,11 @@ num_hidden_layers=3, vocab=4096, tie_word_embeddings=true）+ `pytorch_model.bin
 `layers.i.{subln_attn,subln_ffn}`）。
 
 **验证**：`tests/test_hf_export.py`（键名映射、config/bin 结构、解量化公式一致性、
-`transformers.from_pretrained` 前向——后项 `importorskip("transformers")`，本机未装则跳过）
-+ `tests/test_hf_faithful.py`（忠实权重含 SubLN 键、忠实 fp32 导出 vs 原生引擎 logits
-相对误差 < 1e-2、`from_pretrained` 逐位等价——后项 `importorskip("transformers")`）。
-本仓库全量 pytest 通过。
+`transformers.from_pretrained` 前向）+ `tests/test_hf_faithful.py`（忠实权重含 SubLN 键、
+忠实 fp32 导出 vs 原生引擎 logits 相对误差 < 1e-2、`from_pretrained` 逐位等价）。本机已装
+transformers 5.20.1，上述 `from_pretrained` 用例**真实跑通**（不再 skip）；多组输入实测
+相对误差 max 范数 **8.06e-07**、L2 **3.15e-07**、argmax 一致率 **100%**。纯 torch 回退分支
+（无 transformers 时 `nn.Module` 外壳）也已独立验证逐位等价。本仓库全量 pytest **211 passed / 0 skipped**。
 
 > **2026-10-18 修复（诚实 > 漂亮数字）**：`_dequantize` 原误用「去 `.weight` 基名」
 > （`layers.0.q_proj`）查 `phos.scales`/`phos.hgf`，而二者实际以**全名**
@@ -538,6 +539,13 @@ num_hidden_layers=3, vocab=4096, tie_word_embeddings=true）+ `pytorch_model.bin
 > `from_pretrained` 用例被 `importorskip` 跳过、且参考实现 `_recompute_q_proj` 同用错误基名
 > （错误 vs 错误相等）而假绿。现已统一改为全名查表，导出方才真正还原权重；忠实模式
 > 由此达成与原生引擎逐位等价。
+
+> **2026-10-19 验收实跑（诚实 > 漂亮数字）**：装好 transformers 5.20.1 后，发现 `from_pretrained`
+> 真实路径仍有 3 处未验证根因（此前因无 transformers 全被 skip 掩盖）：`auto_map` 缺 `AutoConfig`
+> 致 `from_pretrained` 直接 `ValueError`；缺 `post_init()` 致权重加载后崩在 `tie_weights`；forward
+> 返回类型随 transformers 安装与否漂移（会反噬其它用例）。均已修复（commit `2b6f294`），现
+> `from_pretrained(trust_remote_code=True)` 真实跑通，多组输入与原生引擎逐位等价
+> （rel_max 8.06e-07、argmax 100%）。
 
 **诚实限制（近似模式的已知、非缺陷）**：
 1. 标准 `LlamaForCausalLM` **不含 BitNet 的 SubLN 子层**（attn/ffn 后的子层归一化，
@@ -567,11 +575,11 @@ python -m phosphorus convert --model ckpt/tiny.phos --out hf_model --faithful
 
 | 检查 | 结果 |
 |---|---|
-| pytest | **119 passed / 6 skipped**（含 50 条 native 内核 + 27 条分页 KV/引擎等价 + 8 条连续批处理 T4-D；skipped=缺失 ckpt 的对照用例） |
+| pytest | **211 passed / 0 skipped**（含 50 条 native 内核 + 27 条分页 KV/引擎等价 + 8 条连续批处理 T4-D；from_pretrained 验收到此前因无 transformers 被 skip，现 transformers 5.20.1 已装并真实跑通） |
 | ruff check / format | 干净 |
 | native vs numpy 位一致性 | int32 与 fp32 域均逐位相等（不变量 ① / ⑧） |
 | paged vs dense 引擎级一致性 | logits 最大差 < 1e-4、argmax 完全一致（不变量 ⑨） |
-| engine↔torch logits 相对误差 | < 5%（不变量 ⑦，忠实路径） |
+| engine↔torch logits 相对误差（忠实 from_pretrained 路径） | **8.06e-07**（多组输入实测 max 范数；不变量 ⑦ <5% 仍成立） |
 | int8 激活路径 | 有限且与忠实路径 cos > 0.9 |
 
 ## 8. 复现命令

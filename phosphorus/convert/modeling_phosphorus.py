@@ -186,6 +186,13 @@ class _PhosphorusBase:
     def forward(self, input_ids: torch.Tensor, return_logits: bool = True) -> torch.Tensor:
         cfg = self.m
         B, T = input_ids.shape
+        # 超长输入：截断到最近 max_position_embeddings 个 token（与原生引擎
+        # engine.py::forward 的滑动窗口语义一致，避免 RoPE 位置越界且与原生
+        # output 对齐——否则忠实模型输出完整 T 而原生截断到 max_seq_len，形状不匹配）。
+        max_seq_len = int(getattr(cfg, "max_position_embeddings", T))
+        if max_seq_len < T:
+            input_ids = input_ids[:, -max_seq_len:]
+            T = max_seq_len
         d = self.d
         dev = input_ids.device
         d_head = d // int(cfg.num_attention_heads)
