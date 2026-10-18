@@ -49,7 +49,8 @@ def test_faithful_matches_engine_fp32(tmp_path):
     model = _load_faithful_model(out, dtype=torch.float32)
     ids_t = torch.tensor([IDS], dtype=torch.long)
     with torch.no_grad():
-        logits = model(ids_t)[0].numpy()  # [T, V]
+        # 两种外壳（PreTrainedModel / 纯 nn.Module）都暴露同一个 `.logits` 接口
+        logits = model(ids_t).logits[0].numpy()  # [T, V]
 
     eng = PhosModel.from_file(TINY, backend="fp32")
     eng.reset()

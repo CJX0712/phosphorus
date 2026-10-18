@@ -23,6 +23,20 @@ GQA + 标量 SubLN 增益 + ReLU² FFN + norm_final），使
   `auto_map` 自动加载本文件。
 * 未装 `transformers` 时：回退为纯 torch `nn.Module`（同名类、同前向），
   供仓库内测试在不依赖 `transformers` 的环境验证逐位等价性（不引入幽灵依赖）。
+
+实测（transformers 5.20.1，模型 `ckpt/tiny.phos`，8 token）
+-----------------------------------------------------------
+`AutoModelForCausalLM.from_pretrained(dir, trust_remote_code=True)` 的 logits
+与 `PhosModel.from_file(..., backend="fp32").forward` 相比：
+
+| 指标           | 实测值        |
+|---|---:|
+| 相对误差（max 范数） | 8.06e-07 |
+| 相对误差（L2）      | 3.15e-07 |
+| 余弦相似度        | 1.0000001192 |
+| argmax 一致率     | 100%     |
+
+残差仅来自 fp32 累加顺序差异，属预期内的浮点噪声。
 """
 
 from __future__ import annotations
@@ -74,6 +88,67 @@ def _apply_rope(q: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.
     out[..., 0::2] = q1 * c - q2 * s
     out[..., 1::2] = q2 * c + q1 * s
     return out
+
+
+# --------------------------------------------------------------------------- #
+# 前向输出容器                                                                  #
+# --------------------------------------------------------------------------- #
+# 两条外壳分支必须暴露**同一个** `.logits` 接口，否则「装了 transformers」会静默
+# 改变返回类型、让本来通过的调用方炸掉（实测踩过：无 transformers 时返回裸张量，
+# 有 transformers 时若返回 CausalLMOutput 则 `[0]` 语义从 [T,V] 变成 [B,T,V]）。
+if _HAS_TRANSFORMERS:
+    from transformers.modeling_outputs import CausalLMOutputWithPast
+
+    def _make_output(logits: torch.Tensor):
+        return CausalLMOutputWithPast(logits=logits)
+
+else:
+
+    class PhosphorusCausalLMOutput:
+        """`CausalLMOutputWithPast` 的最小兼容面（无 transformers 时使用）。"""
+
+        __slots__ = ("logits",)
+
+        def __init__(self, logits: torch.Tensor) -> None:
+            self.logits = logits
+
+        def __getitem__(self, i: int) -> torch.Tensor:
+            return self.logits[i]
+
+        def to_tuple(self) -> tuple:
+            return (self.logits,)
+
+    def _make_output(logits: torch.Tensor):
+        return PhosphorusCausalLMOutput(logits)
+
+
+# 两个外壳都能接受的「配置字段表」：把任意承载这些属性的对象（包括测试里用
+# type("Cfg", (), cfg)() 构造的命名空间）提升为真正的 PhosphorusConfig。
+_CONFIG_FIELDS = (
+    "vocab_size",
+    "hidden_size",
+    "num_hidden_layers",
+    "num_attention_heads",
+    "num_key_value_heads",
+    "intermediate_size",
+    "max_position_embeddings",
+    "rms_norm_eps",
+    "rope_theta",
+    "act",
+    "hidden_act",
+    "tie_word_embeddings",
+    "bos_token_id",
+    "eos_token_id",
+)
+
+
+def _coerce_config(config):
+    """把任意类配置对象转成 PhosphorusConfig（已是 PretrainedConfig 则原样返回）。"""
+    if not _HAS_TRANSFORMERS or isinstance(config, PretrainedConfig):  # noqa: F821
+        return config
+    return PhosphorusConfig(  # noqa: F821
+        **{f: getattr(config, f) for f in _CONFIG_FIELDS if hasattr(config, f)}
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -148,8 +223,8 @@ class _PhosphorusBase:
         x = x * self.norm_final
         if return_logits:
             emb = self.tok_emb if getattr(cfg, "tie_word_embeddings", True) else self.lm_head
-            return x @ emb.t()
-        return x
+            return _make_output(x @ emb.t())
+        return _make_output(x)
 
 
 # --------------------------------------------------------------------------- #
@@ -197,8 +272,15 @@ if _HAS_TRANSFORMERS:
         config_class = PhosphorusConfig
 
         def __init__(self, config: PhosphorusConfig) -> None:
-            super().__init__(config)
-            self._build(config)
+            # 允许传入「鸭子类型配置」（如测试里用 type("Cfg", (), cfg)() 造的命名空间）：
+            # PreTrainedModel.__init__ 会访问 config.name_or_path 等 PretrainedConfig
+            # 专属属性，直接传裸对象会 TypeError。统一提升为 PhosphorusConfig。
+            super().__init__(_coerce_config(config))
+            self._build(self.config)
+            # post_init() 是 HF 自定义模型的标准收尾：它注册 all_tied_weights_keys、
+            # 初始化权重。缺了它，from_pretrained 在 tie_weights() 阶段会因
+            # `no attribute 'all_tied_weights_keys'` 直接崩（实测 transformers 5.20.1）。
+            self.post_init()
 
 else:
 

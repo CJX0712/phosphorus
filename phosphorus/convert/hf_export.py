@@ -167,7 +167,15 @@ def _build_config_faithful(phos, tie_word_embeddings: bool) -> dict:
     return {
         "architectures": ["PhosphorusForCausalLM"],
         "model_type": "phosphorus",
-        "auto_map": {"AutoModelForCausalLM": "modeling_phosphorus.PhosphorusForCausalLM"},
+        # auto_map 必须同时给 AutoConfig 与 AutoModelForCausalLM：
+        # AutoConfig.from_pretrained 只认 auto_map["AutoConfig"]，缺失时它不会去查
+        # auto_map["AutoModelForCausalLM"]，而是直接回退 CONFIG_MAPPING[model_type]，
+        # 而 "phosphorus" 不在内置映射里 → 抛出「does not recognize this architecture」。
+        # 实测（transformers 5.20.1）：只给 AutoModelForCausalLM 时 from_pretrained 必失败。
+        "auto_map": {
+            "AutoConfig": "modeling_phosphorus.PhosphorusConfig",
+            "AutoModelForCausalLM": "modeling_phosphorus.PhosphorusForCausalLM",
+        },
         "vocab_size": int(h["vocab"]),
         "hidden_size": int(h["d_model"]),
         "num_hidden_layers": int(h["n_layer"]),
